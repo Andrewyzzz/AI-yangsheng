@@ -1,7 +1,58 @@
-export async function callLLM() {
+const COUNCIL_ENDPOINT = "/api/council";
+
+export async function enhanceCouncilResult({ localResult, question, profile, checkins }) {
+  try {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 18000);
+
+    const response = await fetch(COUNCIL_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, profile, checkins, localResult }),
+      signal: controller.signal
+    });
+
+    window.clearTimeout(timeout);
+
+    if (!response.ok) {
+      return withFallbackMeta(localResult, `LLM endpoint returned ${response.status}`);
+    }
+
+    const payload = await response.json();
+    if (!payload?.answer || !payload?.debate) {
+      return withFallbackMeta(localResult, "LLM endpoint returned an incomplete council result");
+    }
+
+    return {
+      ...localResult,
+      ...payload,
+      id: localResult.id,
+      question,
+      createdAt: localResult.createdAt,
+      evidence: localResult.evidence,
+      ranked: localResult.ranked,
+      segments: localResult.segments,
+      triage: localResult.triage,
+      llm: {
+        mode: "enhanced",
+        provider: payload.provider || "OpenAI-compatible",
+        model: payload.model || "configured model",
+        agents: payload.agents || ["食养建议师", "安全审查师", "合规编辑"]
+      }
+    };
+  } catch (error) {
+    return withFallbackMeta(localResult, error?.name === "AbortError" ? "LLM endpoint timeout" : error?.message);
+  }
+}
+
+function withFallbackMeta(localResult, reason) {
   return {
-    enabled: false,
-    text: "",
-    note: "LLM provider is not configured yet. The app is using the deterministic local council engine."
+    ...localResult,
+    llm: {
+      mode: "local",
+      provider: "local deterministic council",
+      model: "fallback",
+      reason: reason || "LLM endpoint is not configured"
+    }
   };
 }

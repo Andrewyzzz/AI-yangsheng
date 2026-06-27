@@ -52,6 +52,10 @@ export function triageQuestion(question) {
     return { category: "supplement", blocked: false, caution: true, reason: "补剂/成分相关问题" };
   }
 
+  if (/血糖|糖尿病|高血压|痛风|慢病|长期用药/.test(normalized)) {
+    return { category: "chronic_caution", blocked: false, caution: true, reason: "慢病或指标相关问题" };
+  }
+
   if (/吃什么|食谱|做饭|早餐|晚餐|代餐|即食|买/.test(normalized)) {
     return { category: "food", blocked: false, caution: false, reason: "食谱或商品替代问题" };
   }
@@ -72,6 +76,7 @@ export function deriveContraindications(profile = {}) {
   if (profile.reproductiveStatus === "breastfeeding") flags.push("哺乳期");
   if (profile.reproductiveStatus === "period") flags.push("经期");
   if (conditions.includes("糖尿病")) flags.push("血糖管理");
+  if (/血糖|糖尿病/.test(profile.questionContext || "")) flags.push("血糖管理");
   if (conditions.includes("高血压")) flags.push("血压管理");
   if (conditions.includes("痛风")) flags.push("痛风");
   if (conditions.includes("长期用药")) flags.push("长期用药");

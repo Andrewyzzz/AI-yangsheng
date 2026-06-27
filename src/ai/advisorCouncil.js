@@ -93,6 +93,10 @@ function scoreDocument(doc, question, profile, checkins) {
     score += 2;
     reasons.push("生活方式问题优先引用");
   }
+  if (doc.type === "ingredient" && /血糖|糖尿病|体重|代谢|BMI|控糖|代餐/.test(question)) {
+    score += 2;
+    reasons.push("指标/代谢问题优先引用食材证据");
+  }
 
   return {
     ...doc,
@@ -149,7 +153,7 @@ function buildCandidatePool(evidence, question) {
 function rankCandidates(candidates, profile, checkins, question) {
   return candidates
     .map((candidate) => {
-      const safety = evaluateCandidateSafety(candidate, profile, question);
+      const safety = evaluateCandidateSafety(candidate, { ...profile, questionContext: question }, question);
       const historyBoost = checkins.some((item) => item.feedback === "effective" && item.answer?.includes(candidate.title))
         ? 2
         : 0;
@@ -170,7 +174,7 @@ function sanitizeText(text) {
 function buildAnswer({ question, triage, profile, checkins, evidence, ranked, segments }) {
   const accepted = evidence.filter((doc) => doc.raftDecision === "accept");
   const top = ranked.find((item) => item.safety.verdict === "pass") || ranked[0];
-  const contraindications = deriveContraindications(profile);
+  const contraindications = deriveContraindications({ ...profile, questionContext: question });
   const recent = checkins.slice(-3);
   const recentSummary = recent.length
     ? recent.map((item) => `${item.mood || "未记录"}-${item.symptom || "未记录"}`).join("、")

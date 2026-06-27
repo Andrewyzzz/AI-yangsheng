@@ -1,9 +1,11 @@
 import { AGENTS, runAdvisorCouncil } from "./ai/advisorCouncil.js";
+import { enhanceCouncilResult } from "./ai/llmProvider.js";
 import { loadState, resetState, saveState } from "./state/storage.js";
 
 const app = document.querySelector("#app");
 let state = loadState();
 let currentTab = "home";
+let isThinking = false;
 let draft = {
   mood: "疲惫",
   symptom: "睡不醒",
@@ -79,8 +81,9 @@ function deriveSegmentTags(profile) {
   return tags;
 }
 
-function submitCheckin(event) {
+async function submitCheckin(event) {
   event.preventDefault();
+  if (isThinking) return;
   const checkin = {
     id: `checkin_${Date.now()}`,
     createdAt: new Date().toISOString(),
@@ -90,13 +93,25 @@ function submitCheckin(event) {
     answer: ""
   };
   const question = `我今天${draft.mood}，主要感觉${draft.symptom}，请给我一个安全的养生建议。`;
-  const result = runAdvisorCouncil({
+  const checkinsForContext = [...state.checkins, checkin];
+  const localResult = runAdvisorCouncil({
     question,
     profile: state.profile || {},
-    checkins: [...state.checkins, checkin]
+    checkins: checkinsForContext
   });
-  checkin.answer = result.answer;
   currentTab = "advisor";
+  isThinking = true;
+  render();
+
+  const result = await enhanceCouncilResult({
+    localResult,
+    question,
+    profile: state.profile || {},
+    checkins: checkinsForContext
+  });
+
+  checkin.answer = result.answer;
+  isThinking = false;
   setState({
     ...state,
     checkins: [...state.checkins, checkin],
@@ -104,15 +119,27 @@ function submitCheckin(event) {
   });
 }
 
-function askCouncil(event) {
+async function askCouncil(event) {
   event?.preventDefault();
+  if (isThinking) return;
   const question = draft.question.trim();
   if (!question) return;
-  const result = runAdvisorCouncil({
+  const localResult = runAdvisorCouncil({
     question,
     profile: state.profile || {},
     checkins: state.checkins
   });
+  isThinking = true;
+  render();
+
+  const result = await enhanceCouncilResult({
+    localResult,
+    question,
+    profile: state.profile || {},
+    checkins: state.checkins
+  });
+
+  isThinking = false;
   setState({
     ...state,
     conversations: [result, ...state.conversations].slice(0, 20)
@@ -258,7 +285,7 @@ function renderAdvisor() {
     ${renderHeader("问问 AI 养生顾问团")}
 
     <section class="soft-card">
-      <p class="subtitle">顾问团会先读取你的档案和打卡，再检索证据、过滤干扰资料，最后经过安全和合规审查后回答。</p>
+      <p class="subtitle">顾问团会先读取你的档案和打卡，再检索证据、过滤干扰资料，最后由 3 个 LLM agent 审议：食养建议、安全审查、合规定稿。未配置 API key 时会自动使用本地引擎。</p>
     </section>
 
     <h2 class="section-title">专家席位</h2>
@@ -279,13 +306,19 @@ function renderAdvisor() {
           <label>你的问题</label>
           <textarea id="question-input" placeholder="比如：我今天湿重又胀气，不想做饭，有什么替代？">${escapeHtml(draft.question)}</textarea>
         </div>
-        <button class="primary-btn" type="submit">开始顾问团审议</button>
+        <button class="primary-btn" type="submit" ${isThinking ? "disabled" : ""}>${isThinking ? "顾问团审议中..." : "开始顾问团审议"}</button>
       </form>
       <div class="divider"></div>
       <div class="quick-list">
         ${quickQuestions.map((q) => `<button class="quick-question" data-question="${escapeHtml(q)}">${escapeHtml(q)}</button>`).join("")}
       </div>
     </section>
+
+    ${
+      isThinking
+        ? `<div class="card" style="margin-top:22px"><p class="eyebrow">AI Council</p><h3 class="result-title">顾问团正在审议</h3><p class="small muted">本地规则已完成预审，正在等待 LLM agent 输出建议、反驳和合规定稿。</p></div>`
+        : ""
+    }
 
     ${
       latest
@@ -307,6 +340,9 @@ function renderConversationCard(item, options = {}) {
       <p class="eyebrow">${formatDate(item.createdAt)} · ${escapeHtml(item.triage?.reason || "顾问团审议")}</p>
       <h3 class="result-title">${escapeHtml(item.question)}</h3>
       <div class="answer small">${escapeHtml(item.answer)}</div>
+      <div class="meta-row">
+        ${renderLlmBadge(item)}
+      </div>
       ${
         options.compact
           ? ""
@@ -314,6 +350,14 @@ function renderConversationCard(item, options = {}) {
       }
     </article>
   `;
+}
+
+function renderLlmBadge(item) {
+  if (!item.llm) return `<span class="pill">本地规则引擎</span>`;
+  if (item.llm.mode === "enhanced") {
+    return `<span class="pill">LLM 增强 · ${escapeHtml(item.llm.model)}</span>`;
+  }
+  return `<span class="pill">本地回退 · ${escapeHtml(item.llm.reason || "未配置 API")}</span>`;
 }
 
 function renderEvidence(item) {
