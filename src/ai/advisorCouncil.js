@@ -89,9 +89,25 @@ function scoreDocument(doc, question, profile, checkins) {
     score += 2;
     reasons.push("食谱类问题优先引用");
   }
-  if (doc.type === "habit" && /疲惫|睡|压力|胀气|沉重|最近|连续/.test(question)) {
+  if (doc.type === "habit" && /疲惫|睡|压力|胀气|沉重|连续/.test(question)) {
     score += 2;
     reasons.push("生活方式问题优先引用");
+  }
+  if (
+    doc.type === "habit" &&
+    /上火|口干|嗓子|喉咙|熬夜|辛辣|刺激/.test(question) &&
+    doc.tags.some((tag) => ["上火", "口干", "嗓子", "喉咙", "辛辣", "刺激", "饮水"].includes(tag))
+  ) {
+    score += 3;
+    reasons.push("口咽/刺激类问题优先引用生活方式证据");
+  }
+  if (
+    doc.type === "recipe" &&
+    /上火|口干|嗓子|喉咙|饮品|喝|汤水/.test(question) &&
+    doc.tags.some((tag) => ["上火", "口干", "嗓子", "喉咙", "饮品", "清淡"].includes(tag))
+  ) {
+    score += 2;
+    reasons.push("温和饮品或清淡食谱可作为候选");
   }
   if (doc.type === "ingredient" && /血糖|糖尿病|体重|代谢|BMI|控糖|代餐/.test(question)) {
     score += 2;
@@ -125,15 +141,50 @@ function inferSegments(profile = {}, checkins = []) {
   if (profile.gender === "女性" && /疲惫|怕冷|熬夜|经期|困倦/.test(recentText + (profile.lifestyle || ""))) {
     tags.add("C 能量亏耗");
   }
+  if (/上火|口干|嗓子|喉咙|辛辣|熬夜|刺激/.test(recentText + (profile.lifestyle || ""))) {
+    tags.add("D 口咽刺激观察");
+  }
 
   return [...tags];
+}
+
+function deriveQuestionFocus(question) {
+  if (/上火|口干|嗓子|喉咙|咽|辛辣|刺激/.test(question)) {
+    return {
+      label: "口咽刺激观察",
+      likelyFactors: ["饮水不足或空气干燥", "辛辣油炸、酒精或过甜饮食刺激", "熬夜、说话多或压力造成恢复不足"],
+      actionPlan: [
+        "今天把饮品换成温水或无糖温梨水，少量多次，不靠奶茶、咖啡或酒精顶过去",
+        "当天饮食先做清淡版：少辣、少炸、少甜，主食和蔬菜正常吃，不用刻意进补",
+        "如果想喝汤水，可以选小碗银耳雪梨汤，不额外加糖，血糖偏高者控制水果总量",
+        "减少长时间说话和熬夜，室内偏干时注意加湿或通风"
+      ],
+      avoid: ["辛辣火锅、烧烤、油炸、酒精", "额外加糖的梨汤、奶茶或甜饮", "自行把补剂或偏方当成处理方式"],
+      watchSignals: [
+        "记录嗓子痒/口干的时间、持续多久、是否与空调房/说话多/辛辣饮食有关",
+        "记录是否伴随发热、咳嗽、吞咽困难、皮疹或呼吸不适",
+        "如果症状持续加重、出现高烧或呼吸/吞咽困难，及时咨询医生"
+      ],
+      followUpQuestion: "明天告诉我：嗓子痒或口干出现了几次、每次持续多久、今天是否吃辣/熬夜/待在空调房。"
+    };
+  }
+
+  return {
+    label: "日常状态观察",
+    likelyFactors: ["睡眠、压力、饮食节律和近期活动都可能影响体感"],
+    actionPlan: ["先做一个低风险的小调整", "记录今天执行后的体感变化", "明天用反馈修正建议"],
+    avoid: ["不要用养生建议替代诊疗", "不要自行停药、换药或加药"],
+    watchSignals: ["如果不适持续、加重或伴随急症信号，请及时咨询医生"],
+    followUpQuestion: "明天记录精神、胃口、睡眠和不适变化。"
+  };
 }
 
 function buildCandidatePool(evidence, question) {
   const docs = evidence.filter((doc) => doc.raftDecision === "accept");
   const recipes = docs.filter((doc) => ["recipe", "habit", "ingredient"].includes(doc.type));
+  const genericProductTags = new Set(["温和", "清淡", "女性", "忙碌", "即食"]);
   const products = PRODUCT_CANDIDATES.filter((product) =>
-    product.tags.some((tag) => question.includes(tag) || docs.some((doc) => doc.tags.includes(tag)))
+    product.tags.some((tag) => question.includes(tag) || (!genericProductTags.has(tag) && docs.some((doc) => doc.tags.includes(tag))))
   ).map((product) => ({
     id: product.id,
     title: product.name,
@@ -172,8 +223,10 @@ function sanitizeText(text) {
 }
 
 function buildAnswer({ question, triage, profile, checkins, evidence, ranked, segments }) {
+  const focus = deriveQuestionFocus(question);
   const accepted = evidence.filter((doc) => doc.raftDecision === "accept");
   const top = ranked.find((item) => item.safety.verdict === "pass") || ranked[0];
+  const topTitle = top?.type === "habit" ? focus.label : top?.title;
   const contraindications = deriveContraindications({ ...profile, questionContext: question });
   const recent = checkins.slice(-3);
   const recentSummary = recent.length
@@ -185,7 +238,7 @@ function buildAnswer({ question, triage, profile, checkins, evidence, ranked, se
   }
 
   if (!top) {
-    return "今天没有找到足够安全且匹配的建议。建议先做基础记录，或在症状明显、持续不适时咨询医生。";
+    return `今天没有找到足够安全且匹配的建议。可以先按「${focus.label}」做基础记录和低风险调整；如果症状明显、持续不适或加重，请及时咨询医生。`;
   }
 
   const warnings = [...new Set(ranked.flatMap((item) => item.safety.warnings))].slice(0, 3);
@@ -200,11 +253,15 @@ function buildAnswer({ question, triage, profile, checkins, evidence, ranked, se
   const medicalCaution = triage.caution
     ? "你这个问题涉及补剂、用药或医疗判断，我只能提供生活方式参考，具体用药和疾病处理请咨询医生或药师。"
     : "";
+  const actionSteps = top.type === "habit"
+    ? focus.actionPlan.slice(0, 4)
+    : [top.content, ...focus.actionPlan.slice(0, 2)];
 
   const answer = [
-    `顾问团综合建议：今天优先考虑「${top.title}」。`,
+    `顾问团综合建议：今天优先做「${topTitle}」。`,
     `为什么：你的近期记录是 ${recentSummary}，当前标签倾向于 ${segments.join("、") || "日常养生观察"}；本次采纳了 ${evidenceLine || "内部安全规则库"} 作为依据。`,
-    `怎么做：${top.content}`,
+    `怎么做：${actionSteps.join("；")}。`,
+    `观察什么：${focus.watchSignals.slice(0, 3).join("；")}。`,
     cautionLine,
     contraindications.length ? `已纳入的个人边界：${contraindications.join("、")}。` : "你还没有填写明显禁忌，建议完善档案后再做更细建议。",
     medicalCaution,
@@ -217,8 +274,10 @@ function buildAnswer({ question, triage, profile, checkins, evidence, ranked, se
 }
 
 function buildFinalReport({ question, triage, profile, checkins, evidence, ranked, segments }) {
+  const focus = deriveQuestionFocus(question);
   const accepted = evidence.filter((doc) => doc.raftDecision === "accept");
   const top = ranked.find((item) => item.safety.verdict === "pass") || ranked[0];
+  const topTitle = top?.type === "habit" ? focus.label : top?.title;
   const contraindications = deriveContraindications({ ...profile, questionContext: question });
   const warnings = [...new Set(ranked.flatMap((item) => item.safety.warnings))].slice(0, 4);
   const recent = checkins.slice(-3);
@@ -242,36 +301,39 @@ function buildFinalReport({ question, triage, profile, checkins, evidence, ranke
   }
 
   return {
-    headline: top ? `今天优先考虑「${top.title}」` : "今天先做低风险观察",
-    recommendation: top ? `选择「${top.title}」作为今天的主要建议。` : "先记录状态，选择温和、低负担的饮食和作息。",
+    headline: top ? `今天先做「${topTitle}」` : `先做${focus.label}`,
+    recommendation: top
+      ? `以「${topTitle}」作为今天的主要建议，同时按${focus.label}记录诱因和变化。`
+      : `先按${focus.label}做低风险调整，并记录具体症状。`,
     rationale: [
+      `问题焦点：${focus.label}`,
       `近期记录：${recentSummary}`,
       `当前标签：${segments.join("、") || "日常养生观察"}`,
-      accepted.length ? `采纳证据：${accepted.slice(0, 3).map((doc) => doc.title).join("、")}` : "采纳内部安全规则"
+      accepted.length ? `采纳证据：${accepted.slice(0, 3).map((doc) => doc.title).join("、")}` : "采纳内部安全规则",
+      ...focus.likelyFactors.slice(0, 2)
     ],
     actionPlan: top
       ? [
-          top.content,
-          "先少量尝试，观察 2-3 小时体感变化",
+          ...(top.type === "habit" ? [] : [top.content]),
+          ...focus.actionPlan.slice(0, 4),
           "记录有效、一般或无效，作为下次推荐依据"
         ]
-      : ["完成一次基础打卡", "补充过敏、慢病、用药和近期生活状态"],
+      : [...focus.actionPlan, "补充过敏、慢病、用药和近期生活状态"],
     avoid: [
+      ...focus.avoid,
       ...warnings,
       ...contraindications.map((item) => `注意个人边界：${item}`)
     ].slice(0, 5),
-    watchSignals: [
-      "如果疲惫、胀气、疼痛等不适持续加重，及时咨询医生",
-      "如果涉及慢病、孕期、儿童或长期用药，先问医生或药师"
-    ],
+    watchSignals: focus.watchSignals,
     evidenceUsed: accepted.slice(0, 4).map((doc) => `${doc.title}：${doc.raftReason}`),
     safetyNotes: warnings.length ? warnings : ["本地安全审查未发现明显硬性冲突"],
     confidence: triage.caution ? "caution" : "pass",
-    followUpQuestion: "明天记录吃完后的精神、胃口、睡眠和不适变化。"
+    followUpQuestion: focus.followUpQuestion
   };
 }
 
 function buildDebate({ profile, question, triage, evidence, ranked, segments }) {
+  const focus = deriveQuestionFocus(question);
   const accepted = evidence.filter((doc) => doc.raftDecision === "accept");
   const filtered = evidence.filter((doc) => doc.raftDecision === "filter");
   const top = ranked[0];
@@ -286,24 +348,31 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
           {
             agent: "画像分析师",
             stance: "用户状态",
-            content: `当前可识别标签：${segments.join("、") || "暂无明确标签"}。问题类型：${triage.reason}。`,
+            content: `当前可识别标签：${segments.join("、") || focus.label}。问题类型：${triage.reason}。本地先把问题焦点放在「${focus.label}」，不直接判断疾病原因。`,
             bullets: [
               `问题文本：${question}`,
-              `档案边界：${deriveContraindications({ ...profile, questionContext: question }).join("、") || "未填写明显禁忌"}`
+              `档案边界：${deriveContraindications({ ...profile, questionContext: question }).join("、") || "未填写明显禁忌"}`,
+              ...focus.likelyFactors.slice(0, 2)
             ]
           },
           {
             agent: "证据检索师",
             stance: "证据选择",
-            content: `检索 ${evidence.length} 条资料，采纳 ${accepted.length} 条，过滤 ${filtered.length} 条低相关资料。`,
-            accepted: accepted.slice(0, 3).map((doc) => `${doc.title}：${doc.raftReason}`),
-            challenged: filtered.slice(0, 3).map((doc) => `${doc.title}：${doc.raftReason}`)
+            content: accepted.length
+              ? `检索 ${evidence.length} 条资料，采纳 ${accepted.length} 条与当前问题最相关的资料，过滤 ${filtered.length} 条低相关资料。`
+              : `检索 ${evidence.length} 条资料，未找到强相关证据；低相关资料不展开，避免让 RAG 噪声主导建议。`,
+            accepted: accepted.slice(0, 2).map((doc) => `${doc.title}：${doc.raftReason}`),
+            challenged: filtered.length ? [`已过滤 ${filtered.length} 条低相关资料，不进入最终建议。`] : []
           },
           {
             agent: "食养建议师",
             stance: "候选建议",
-            content: top ? `首选候选为「${top.title}」，匹配分 ${top.fitScore.toFixed(1)}。` : "没有足够安全的候选。",
-            bullets: ranked.slice(0, 3).map((item) => `${item.title}：匹配分 ${item.fitScore.toFixed(1)}`)
+            content: top
+              ? `首选候选为「${top.type === "habit" ? focus.label : top.title}」，匹配分 ${top.fitScore.toFixed(1)}；同时需要保留症状记录和安全边界。`
+              : `没有足够强的食谱候选，但可先执行「${focus.label}」的低风险生活方式方案。`,
+            bullets: ranked.length
+              ? ranked.slice(0, 3).map((item) => `${item.title}：匹配分 ${item.fitScore.toFixed(1)}`)
+              : focus.actionPlan.slice(0, 3)
           }
         ]
       },
@@ -315,8 +384,8 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
             stance: "风险检查",
             content: safetyWarnings.length
               ? `提出风险：${[...new Set(safetyWarnings)].slice(0, 3).join("；")}。`
-              : "未发现当前档案下的明显硬性冲突。",
-            challenged: [...new Set(safetyWarnings)].slice(0, 5)
+              : "未发现当前档案下的明显硬性冲突，但需要观察是否出现持续加重或急性信号。",
+            challenged: [...new Set([...safetyWarnings, ...focus.watchSignals])].slice(0, 5)
           },
           {
             agent: "合规编辑",
@@ -333,11 +402,11 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
             agent: "陪伴教练",
             stance: "今日可执行",
             content: top
-              ? `把建议压缩成一个今天能完成的小动作：先尝试「${top.title}」，并记录有效/一般/无效。`
-              : "建议先完善档案或选择更基础的生活记录。",
+              ? `把建议变成今天能执行的小计划：先尝试「${top.type === "habit" ? focus.label : top.title}」，同时按症状、诱因、饮食和环境记录变化。`
+              : `先做${focus.label}的基础计划，重点是把症状记录清楚，方便下一轮建议更准确。`,
             bullets: top
-              ? ["先少量尝试", "记录体感变化", "下次用反馈修正建议"]
-              : ["完善档案", "补充近期状态", "避免高风险自我处理"]
+              ? ["先少量尝试", ...focus.watchSignals.slice(0, 3), "下次用反馈修正建议"]
+              : [...focus.actionPlan.slice(0, 3), ...focus.watchSignals.slice(0, 2)]
           }
         ]
       }

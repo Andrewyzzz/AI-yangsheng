@@ -430,10 +430,18 @@ function renderReportPanel(title, items) {
 
 function renderEvidence(item) {
   const evidence = item.evidence || [];
+  const accepted = evidence.filter((doc) => doc.raftDecision === "accept").slice(0, 3);
+  const filteredCount = evidence.filter((doc) => doc.raftDecision === "filter").length;
+  const visibleEvidence = accepted.length ? accepted : evidence.slice(0, 1);
   return `
     <h2 class="section-title">RAG / RAFT 证据过滤</h2>
+    <section class="evidence-summary">
+      <div><span>采纳</span><strong>${accepted.length}</strong></div>
+      <div><span>过滤</span><strong>${filteredCount}</strong></div>
+      <p>${escapeHtml(accepted.length ? "仅展示进入审议的高相关证据，低相关资料折叠处理。" : "暂无强相关证据，低相关资料不进入最终建议。")}</p>
+    </section>
     <section class="evidence-list">
-      ${evidence
+      ${visibleEvidence
         .map(
           (doc) => `
             <article class="evidence-item">

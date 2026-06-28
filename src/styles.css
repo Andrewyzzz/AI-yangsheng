@@ -395,6 +395,45 @@ button {
   gap: 12px;
 }
 
+.evidence-summary {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.evidence-summary div {
+  display: grid;
+  place-items: center;
+  min-width: 54px;
+  padding: 6px 8px;
+  border-radius: 14px;
+  background: var(--sage-soft);
+}
+
+.evidence-summary span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.evidence-summary strong {
+  color: var(--sage-dark);
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.evidence-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .evidence-item,
 .debate-item,
 .history-item {

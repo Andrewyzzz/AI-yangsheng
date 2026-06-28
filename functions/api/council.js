@@ -372,35 +372,64 @@ function buildFinalReport({ finalOutput, rounds, localResult, timings }) {
   const llmReport = finalOutput.final_report && typeof finalOutput.final_report === "object"
     ? finalOutput.final_report
     : {};
+  const localReport = localResult.finalReport || {};
   const finalEntries = rounds.flatMap((round) => round.entries || []);
   const acceptedEvidence = localResult.evidence
     .filter((item) => item.raftDecision === "accept")
     .slice(0, 3)
     .map((item) => `${item.title}：${item.raftReason}`);
+  const mergeReportList = (primary, fallback, finalFallback = []) => {
+    const seen = new Set();
+    return [primary, fallback, finalFallback]
+      .flatMap((value) => asTextList(value))
+      .filter((item) => {
+        const normalized = item.replace(/\s+/g, "");
+        if (!normalized || seen.has(normalized)) return false;
+        seen.add(normalized);
+        return true;
+      })
+      .slice(0, 6);
+  };
 
   return {
-    headline: llmReport.headline || finalOutput.summary || "顾问团完成审议",
-    recommendation: llmReport.recommendation || finalOutput.recommendation || "采用低风险、可执行的生活方式建议。",
-    rationale: asTextList(llmReport.rationale).length
-      ? asTextList(llmReport.rationale)
-      : finalEntries.flatMap((entry) => asTextList(entry.consensus || entry.accepted || entry.bullets)).slice(0, 5),
-    actionPlan: asTextList(llmReport.action_plan).length
-      ? asTextList(llmReport.action_plan)
-      : finalEntries.filter((entry) => entry.agent === "陪伴教练").flatMap((entry) => asTextList(entry.bullets)).slice(0, 5),
-    avoid: asTextList(llmReport.avoid).length
-      ? asTextList(llmReport.avoid)
-      : finalEntries.flatMap((entry) => asTextList(entry.challenged)).slice(0, 5),
-    watchSignals: asTextList(llmReport.watch_signals).length
-      ? asTextList(llmReport.watch_signals)
-      : ["如果不适持续、加重，或出现急性症状，请及时咨询医生。"],
-    evidenceUsed: asTextList(llmReport.evidence_used).length
-      ? asTextList(llmReport.evidence_used)
-      : acceptedEvidence,
-    safetyNotes: asTextList(llmReport.safety_notes).length
-      ? asTextList(llmReport.safety_notes)
-      : asTextList(finalOutput.required_changes).concat([finalOutput.risk_review]).filter(Boolean).slice(0, 4),
+    headline: llmReport.headline || localReport.headline || finalOutput.summary || "顾问团完成审议",
+    recommendation:
+      llmReport.recommendation ||
+      localReport.recommendation ||
+      finalOutput.recommendation ||
+      "采用低风险、可执行的生活方式建议。",
+    rationale: mergeReportList(
+      llmReport.rationale,
+      localReport.rationale,
+      finalEntries.flatMap((entry) => asTextList(entry.consensus || entry.accepted || entry.bullets)).slice(0, 5)
+    ),
+    actionPlan: mergeReportList(
+      llmReport.action_plan || llmReport.actionPlan,
+      localReport.actionPlan,
+      finalEntries.filter((entry) => entry.agent === "陪伴教练").flatMap((entry) => asTextList(entry.bullets)).slice(0, 5)
+    ),
+    avoid: mergeReportList(
+      llmReport.avoid,
+      localReport.avoid,
+      finalEntries.flatMap((entry) => asTextList(entry.challenged)).slice(0, 5)
+    ),
+    watchSignals: mergeReportList(
+      llmReport.watch_signals || llmReport.watchSignals,
+      localReport.watchSignals,
+      ["如果不适持续、加重，或出现急性症状，请及时咨询医生。"]
+    ),
+    evidenceUsed: mergeReportList(
+      llmReport.evidence_used || llmReport.evidenceUsed,
+      localReport.evidenceUsed,
+      acceptedEvidence
+    ),
+    safetyNotes: mergeReportList(
+      llmReport.safety_notes || llmReport.safetyNotes,
+      localReport.safetyNotes,
+      asTextList(finalOutput.required_changes).concat([finalOutput.risk_review]).filter(Boolean).slice(0, 4)
+    ),
     confidence: llmReport.confidence || finalOutput.safety_verdict || "caution",
-    followUpQuestion: llmReport.follow_up_question || "明天可以根据实际感受再调整。",
+    followUpQuestion: llmReport.follow_up_question || llmReport.followUpQuestion || localReport.followUpQuestion || "明天可以根据实际感受再调整。",
     totalDurationMs: timings.totalMs
   };
 }
@@ -579,6 +608,15 @@ ${ROUND_OUTPUT_CONTRACT}
 const FINAL_SYNTHESIS_INSTRUCTION = `
 这是最终聚合轮。你代表安全审查师和合规编辑读取 previous_rounds，将 6 个角色从分散意见收敛成统一结论。
 必须体现：哪些分歧被解决、哪些风险被保留、最终建议如何因 debate 被修改。
+最终报告必须具体，不能只写“记录具体症状”。如果用户问上火、口干、嗓子痒、喉咙不适，action_plan 至少包含：
+- 今天饮水/饮品怎么调整；
+- 饮食刺激物怎么减少；
+- 是否可选温和汤水或水果，份量和糖分边界；
+- 休息、环境或说话用嗓的调整。
+watch_signals 至少包含：
+- 症状出现时间、频率、持续多久；
+- 是否与辛辣、熬夜、空调房、说话多、过敏原有关；
+- 是否伴随发热、吞咽困难、呼吸不适、皮疹等需要咨询医生的信号。
 输出 JSON：
 {
   "summary": "一句话总结最终结论",
