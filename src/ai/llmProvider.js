@@ -37,7 +37,8 @@ export async function enhanceCouncilResult({ localResult, question, profile, che
         mode: "enhanced",
         provider: payload.provider || "OpenAI-compatible",
         model: payload.model || "configured model",
-        agents: payload.agents || ["食养建议师", "安全审查师", "合规编辑"]
+        agents: payload.agents || ["画像分析师", "证据检索师", "食养建议师", "陪伴教练", "安全审查师", "合规编辑"],
+        timings: payload.timings || null
       }
     };
   } catch (error) {

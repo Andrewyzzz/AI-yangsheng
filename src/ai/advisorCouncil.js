@@ -216,6 +216,61 @@ function buildAnswer({ question, triage, profile, checkins, evidence, ranked, se
   return sanitizeText(answer);
 }
 
+function buildFinalReport({ question, triage, profile, checkins, evidence, ranked, segments }) {
+  const accepted = evidence.filter((doc) => doc.raftDecision === "accept");
+  const top = ranked.find((item) => item.safety.verdict === "pass") || ranked[0];
+  const contraindications = deriveContraindications({ ...profile, questionContext: question });
+  const warnings = [...new Set(ranked.flatMap((item) => item.safety.warnings))].slice(0, 4);
+  const recent = checkins.slice(-3);
+  const recentSummary = recent.length
+    ? recent.map((item) => `${item.mood || "未记录"}-${item.symptom || "未记录"}`).join("、")
+    : "暂无连续打卡记录";
+
+  if (triage.blocked) {
+    return {
+      headline: "建议先转向专业医疗判断",
+      recommendation: triage.response,
+      rationale: [triage.reason],
+      actionPlan: ["暂停自行尝试食疗或补剂", "如有急性或持续不适，请及时咨询医生"],
+      avoid: ["不要用养生建议替代诊疗", "不要自行停药、换药或加药"],
+      watchSignals: ["症状持续、加重或出现急症信号时及时就医"],
+      evidenceUsed: accepted.map((doc) => `${doc.title}：${doc.raftReason}`),
+      safetyNotes: ["当前问题触发高风险分流"],
+      confidence: "block",
+      followUpQuestion: "等专业判断明确后，再记录饮食、睡眠和体感变化。"
+    };
+  }
+
+  return {
+    headline: top ? `今天优先考虑「${top.title}」` : "今天先做低风险观察",
+    recommendation: top ? `选择「${top.title}」作为今天的主要建议。` : "先记录状态，选择温和、低负担的饮食和作息。",
+    rationale: [
+      `近期记录：${recentSummary}`,
+      `当前标签：${segments.join("、") || "日常养生观察"}`,
+      accepted.length ? `采纳证据：${accepted.slice(0, 3).map((doc) => doc.title).join("、")}` : "采纳内部安全规则"
+    ],
+    actionPlan: top
+      ? [
+          top.content,
+          "先少量尝试，观察 2-3 小时体感变化",
+          "记录有效、一般或无效，作为下次推荐依据"
+        ]
+      : ["完成一次基础打卡", "补充过敏、慢病、用药和近期生活状态"],
+    avoid: [
+      ...warnings,
+      ...contraindications.map((item) => `注意个人边界：${item}`)
+    ].slice(0, 5),
+    watchSignals: [
+      "如果疲惫、胀气、疼痛等不适持续加重，及时咨询医生",
+      "如果涉及慢病、孕期、儿童或长期用药，先问医生或药师"
+    ],
+    evidenceUsed: accepted.slice(0, 4).map((doc) => `${doc.title}：${doc.raftReason}`),
+    safetyNotes: warnings.length ? warnings : ["本地安全审查未发现明显硬性冲突"],
+    confidence: triage.caution ? "caution" : "pass",
+    followUpQuestion: "明天记录吃完后的精神、胃口、睡眠和不适变化。"
+  };
+}
+
 function buildDebate({ profile, question, triage, evidence, ranked, segments }) {
   const accepted = evidence.filter((doc) => doc.raftDecision === "accept");
   const filtered = evidence.filter((doc) => doc.raftDecision === "filter");
@@ -231,17 +286,24 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
           {
             agent: "画像分析师",
             stance: "用户状态",
-            content: `当前可识别标签：${segments.join("、") || "暂无明确标签"}。问题类型：${triage.reason}。`
+            content: `当前可识别标签：${segments.join("、") || "暂无明确标签"}。问题类型：${triage.reason}。`,
+            bullets: [
+              `问题文本：${question}`,
+              `档案边界：${deriveContraindications({ ...profile, questionContext: question }).join("、") || "未填写明显禁忌"}`
+            ]
           },
           {
             agent: "证据检索师",
             stance: "证据选择",
-            content: `检索 ${evidence.length} 条资料，采纳 ${accepted.length} 条，过滤 ${filtered.length} 条低相关资料。`
+            content: `检索 ${evidence.length} 条资料，采纳 ${accepted.length} 条，过滤 ${filtered.length} 条低相关资料。`,
+            accepted: accepted.slice(0, 3).map((doc) => `${doc.title}：${doc.raftReason}`),
+            challenged: filtered.slice(0, 3).map((doc) => `${doc.title}：${doc.raftReason}`)
           },
           {
             agent: "食养建议师",
             stance: "候选建议",
-            content: top ? `首选候选为「${top.title}」，匹配分 ${top.fitScore.toFixed(1)}。` : "没有足够安全的候选。"
+            content: top ? `首选候选为「${top.title}」，匹配分 ${top.fitScore.toFixed(1)}。` : "没有足够安全的候选。",
+            bullets: ranked.slice(0, 3).map((item) => `${item.title}：匹配分 ${item.fitScore.toFixed(1)}`)
           }
         ]
       },
@@ -253,12 +315,14 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
             stance: "风险检查",
             content: safetyWarnings.length
               ? `提出风险：${[...new Set(safetyWarnings)].slice(0, 3).join("；")}。`
-              : "未发现当前档案下的明显硬性冲突。"
+              : "未发现当前档案下的明显硬性冲突。",
+            challenged: [...new Set(safetyWarnings)].slice(0, 5)
           },
           {
             agent: "合规编辑",
             stance: "话术边界",
-            content: "回答不得包含医疗判断、效果承诺、停药换药建议；涉及补剂和慢病时必须提示咨询专业人士。"
+            content: "回答不得包含医疗判断、效果承诺、停药换药建议；涉及补剂和慢病时必须提示咨询专业人士。",
+            requiredChanges: ["不做诊断", "不承诺治疗或有效率", "不替代医生或药师建议"]
           }
         ]
       },
@@ -270,7 +334,10 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
             stance: "今日可执行",
             content: top
               ? `把建议压缩成一个今天能完成的小动作：先尝试「${top.title}」，并记录有效/一般/无效。`
-              : "建议先完善档案或选择更基础的生活记录。"
+              : "建议先完善档案或选择更基础的生活记录。",
+            bullets: top
+              ? ["先少量尝试", "记录体感变化", "下次用反馈修正建议"]
+              : ["完善档案", "补充近期状态", "避免高风险自我处理"]
           }
         ]
       }
@@ -285,6 +352,7 @@ export function runAdvisorCouncil({ question, profile, checkins }) {
   const candidates = triage.blocked ? [] : buildCandidatePool(evidence, question);
   const ranked = triage.blocked ? [] : rankCandidates(candidates, profile, checkins, question);
   const answer = buildAnswer({ question, triage, profile, checkins, evidence, ranked, segments });
+  const finalReport = buildFinalReport({ question, triage, profile, checkins, evidence, ranked, segments });
   const debate = buildDebate({ profile, question, triage, evidence, ranked, segments });
 
   return {
@@ -296,6 +364,7 @@ export function runAdvisorCouncil({ question, profile, checkins }) {
     evidence,
     ranked,
     segments,
+    finalReport,
     debate
   };
 }

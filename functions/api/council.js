@@ -20,21 +20,24 @@ export async function onRequestPost(context) {
     }
 
     const contextBundle = buildContextBundle(payload);
+    const startedAt = Date.now();
 
-    const profileEvidence = await callAgent({
+    const profileEvidenceResult = await timedAgentCall({
       slot: slots[0],
       contextBundle
     });
+    const profileEvidence = profileEvidenceResult.output;
 
-    const foodCompanion = await callAgent({
+    const foodCompanionResult = await timedAgentCall({
       slot: slots[1],
       contextBundle: {
         ...contextBundle,
         profile_evidence_output: profileEvidence
       }
     });
+    const foodCompanion = foodCompanionResult.output;
 
-    const safetyCompliance = await callAgent({
+    const safetyComplianceResult = await timedAgentCall({
       slot: slots[2],
       contextBundle: {
         ...contextBundle,
@@ -42,66 +45,43 @@ export async function onRequestPost(context) {
         food_companion_output: foodCompanion
       }
     });
+    const safetyCompliance = safetyComplianceResult.output;
 
-    const answer = sanitizeAnswer(safetyCompliance.final_answer || localResult.answer);
+    const timings = {
+      totalMs: Date.now() - startedAt,
+      slots: [
+        profileEvidenceResult.timing,
+        foodCompanionResult.timing,
+        safetyComplianceResult.timing
+      ]
+    };
+    const finalReport = buildFinalReport({
+      safetyCompliance,
+      foodCompanion,
+      profileEvidence,
+      localResult,
+      timings
+    });
+    const answer = sanitizeAnswer(safetyCompliance.final_answer || formatFinalAnswer(finalReport) || localResult.answer);
     const modelSummary = summarizeSlots(slots);
+    const debate = buildLlmDebate({
+      localResult,
+      slots,
+      profileEvidence,
+      foodCompanion,
+      safetyCompliance,
+      timings,
+      finalReport
+    });
 
     return json({
       provider: "3 LLM council",
       model: modelSummary,
       agents: ["画像分析师", "证据检索师", "食养建议师", "陪伴教练", "安全审查师", "合规编辑"],
       answer,
-      debate: {
-        agents: localResult.debate?.agents || [],
-        rounds: [
-          ...(localResult.debate?.rounds || []),
-          {
-            name: "Round 4 LLM 画像与证据",
-            entries: [
-              {
-                agent: "画像分析师",
-                stance: slots[0].label,
-                content: profileEvidence.profile_analysis || profileEvidence.summary || "已基于档案和近期打卡完成画像分析。"
-              },
-              {
-                agent: "证据检索师",
-                stance: slots[0].label,
-                content: profileEvidence.evidence_review || "已复核采纳证据和过滤证据的相关性。"
-              }
-            ]
-          },
-          {
-            name: "Round 5 LLM 食养与陪伴",
-            entries: [
-              {
-                agent: "食养建议师",
-                stance: slots[1].label,
-                content: foodCompanion.recommendation_summary || foodCompanion.summary || "已基于候选和证据生成建议。"
-              },
-              {
-                agent: "陪伴教练",
-                stance: slots[1].label,
-                content: foodCompanion.companion_plan || "已将建议改写为今天可以执行的小步骤。"
-              }
-            ]
-          },
-          {
-            name: "Round 6 LLM 安全与合规",
-            entries: [
-              {
-                agent: "安全审查师",
-                stance: safetyCompliance.safety_verdict || "安全复核",
-                content: safetyCompliance.risk_review || "已复核禁忌、慢病、过敏、孕期/经期、用药和急症边界。"
-              },
-              {
-                agent: "合规编辑",
-                stance: "最终回答",
-                content: safetyCompliance.compliance_review || safetyCompliance.summary || "已移除医疗判断、效果承诺和不合规表达。"
-              }
-            ]
-          }
-        ]
-      }
+      finalReport,
+      timings,
+      debate
     });
   } catch (error) {
     return json({ error: error?.message || "LLM council failed" }, 500);
@@ -158,6 +138,22 @@ function summarizeSlots(slots) {
     .join(" · ");
 }
 
+async function timedAgentCall({ slot, contextBundle }) {
+  const start = Date.now();
+  const output = await callAgent({ slot, contextBundle });
+  return {
+    output,
+    timing: {
+      key: slot.key,
+      label: slot.label,
+      role: slot.role,
+      provider: slot.provider,
+      model: slot.model,
+      durationMs: Date.now() - start
+    }
+  };
+}
+
 async function callAgent({ slot, contextBundle }) {
   const response = await fetch(`${slot.baseUrl}/chat/completions`, {
     method: "POST",
@@ -195,6 +191,179 @@ async function callAgent({ slot, contextBundle }) {
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content || "{}";
   return safeJson(content);
+}
+
+function buildLlmDebate({ localResult, slots, profileEvidence, foodCompanion, safetyCompliance, timings, finalReport }) {
+  return {
+    agents: localResult.debate?.agents || [],
+    metrics: {
+      mode: "3 LLM / 6 roles",
+      totalMs: timings.totalMs,
+      slotTimings: timings.slots,
+      finalVerdict: safetyCompliance.safety_verdict || finalReport.confidence || "caution"
+    },
+    rounds: [
+      ...(localResult.debate?.rounds || []),
+      {
+        name: "Round 4 LLM 画像与证据",
+        phase: "independent_analysis",
+        summary: profileEvidence.summary || "画像与证据组完成档案读取和 RAG/RAFT 证据复核。",
+        durationMs: timings.slots[0]?.durationMs,
+        entries: [
+          {
+            agent: "画像分析师",
+            roleGroup: slots[0].label,
+            stance: "用户画像",
+            model: `${slots[0].provider}/${slots[0].model}`,
+            content: profileEvidence.profile_analysis || profileEvidence.summary || "已基于档案和近期打卡完成画像分析。",
+            bullets: asTextList(profileEvidence.profile_claims),
+            questions: asTextList(profileEvidence.questions_for_next_agent)
+          },
+          {
+            agent: "证据检索师",
+            roleGroup: slots[0].label,
+            stance: "证据复核",
+            model: `${slots[0].provider}/${slots[0].model}`,
+            content: profileEvidence.evidence_review || "已复核采纳证据和过滤证据的相关性。",
+            accepted: asTextList(profileEvidence.evidence_used),
+            challenged: asTextList(profileEvidence.filtered_out)
+          }
+        ]
+      },
+      {
+        name: "Round 5 LLM 食养与陪伴",
+        phase: "proposal_and_coaching",
+        summary: foodCompanion.summary || "食养与陪伴组基于画像和证据形成可执行建议。",
+        durationMs: timings.slots[1]?.durationMs,
+        entries: [
+          {
+            agent: "食养建议师",
+            roleGroup: slots[1].label,
+            stance: foodCompanion.recommended_title || "推荐方案",
+            model: `${slots[1].provider}/${slots[1].model}`,
+            content: foodCompanion.recommendation_summary || foodCompanion.proposal || foodCompanion.summary || "已基于候选和证据生成建议。",
+            bullets: asTextList(foodCompanion.why_this_fits),
+            alternatives: asTextList(foodCompanion.alternatives),
+            responseToPrevious: foodCompanion.response_to_evidence || ""
+          },
+          {
+            agent: "陪伴教练",
+            roleGroup: slots[1].label,
+            stance: "执行落地",
+            model: `${slots[1].provider}/${slots[1].model}`,
+            content: foodCompanion.companion_plan || "已将建议改写为今天可以执行的小步骤。",
+            bullets: asTextList(foodCompanion.today_steps),
+            challenged: asTextList(foodCompanion.avoid),
+            questions: asTextList(foodCompanion.questions_for_safety)
+          }
+        ]
+      },
+      {
+        name: "Round 6 LLM 安全与合规",
+        phase: "cross_rebuttal_and_final",
+        summary: safetyCompliance.summary || "安全与合规组完成反驳、修正和最终定稿。",
+        durationMs: timings.slots[2]?.durationMs,
+        entries: [
+          {
+            agent: "安全审查师",
+            roleGroup: slots[2].label,
+            stance: safetyCompliance.safety_verdict || "安全复核",
+            model: `${slots[2].provider}/${slots[2].model}`,
+            content: safetyCompliance.risk_review || "已复核禁忌、慢病、过敏、孕期/经期、用药和急症边界。",
+            challenged: asTextList(safetyCompliance.objections),
+            requiredChanges: asTextList(safetyCompliance.required_changes)
+          },
+          {
+            agent: "合规编辑",
+            roleGroup: slots[2].label,
+            stance: "最终定稿",
+            model: `${slots[2].provider}/${slots[2].model}`,
+            content: safetyCompliance.compliance_review || safetyCompliance.summary || "已移除医疗判断、效果承诺和不合规表达。",
+            bullets: [
+              finalReport.recommendation,
+              ...(finalReport.safetyNotes || []).slice(0, 2)
+            ].filter(Boolean)
+          }
+        ]
+      }
+    ]
+  };
+}
+
+function buildFinalReport({ safetyCompliance, foodCompanion, profileEvidence, localResult, timings }) {
+  const llmReport = safetyCompliance.final_report && typeof safetyCompliance.final_report === "object"
+    ? safetyCompliance.final_report
+    : {};
+  const acceptedEvidence = localResult.evidence
+    .filter((item) => item.raftDecision === "accept")
+    .slice(0, 3)
+    .map((item) => `${item.title}：${item.raftReason}`);
+
+  return {
+    headline: llmReport.headline || safetyCompliance.summary || "顾问团完成审议",
+    recommendation: llmReport.recommendation || foodCompanion.recommended_title || foodCompanion.recommendation_summary || "采用低风险、可执行的生活方式建议。",
+    rationale: asTextList(llmReport.rationale).length
+      ? asTextList(llmReport.rationale)
+      : [
+          profileEvidence.profile_analysis,
+          profileEvidence.evidence_review,
+          foodCompanion.recommendation_summary
+        ].filter(Boolean).slice(0, 4),
+    actionPlan: asTextList(llmReport.action_plan).length
+      ? asTextList(llmReport.action_plan)
+      : asTextList(foodCompanion.today_steps).concat(asTextList(foodCompanion.companion_plan)).slice(0, 5),
+    avoid: asTextList(llmReport.avoid).length
+      ? asTextList(llmReport.avoid)
+      : asTextList(foodCompanion.avoid).concat(asTextList(safetyCompliance.objections)).slice(0, 5),
+    watchSignals: asTextList(llmReport.watch_signals).length
+      ? asTextList(llmReport.watch_signals)
+      : ["如果不适持续、加重，或出现急性症状，请及时咨询医生。"],
+    evidenceUsed: asTextList(llmReport.evidence_used).length
+      ? asTextList(llmReport.evidence_used)
+      : acceptedEvidence,
+    safetyNotes: asTextList(llmReport.safety_notes).length
+      ? asTextList(llmReport.safety_notes)
+      : asTextList(safetyCompliance.required_changes).concat([safetyCompliance.risk_review]).filter(Boolean).slice(0, 4),
+    confidence: llmReport.confidence || safetyCompliance.safety_verdict || "caution",
+    followUpQuestion: llmReport.follow_up_question || "明天可以根据实际感受再调整。",
+    totalDurationMs: timings.totalMs
+  };
+}
+
+function formatFinalAnswer(report) {
+  if (!report) return "";
+  const lines = [
+    `顾问团综合建议：${report.recommendation}`,
+    report.rationale?.length ? `为什么这样建议：${report.rationale.join("；")}` : "",
+    report.actionPlan?.length ? `今天怎么做：${report.actionPlan.join("；")}` : "",
+    report.avoid?.length ? `需要避开的情况：${report.avoid.join("；")}` : "",
+    report.watchSignals?.length ? `观察指标：${report.watchSignals.join("；")}` : "",
+    "本建议仅为养生参考，不能替代医生判断或医疗处置。"
+  ];
+  return lines.filter(Boolean).join("\n\n");
+}
+
+function asTextList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((item) => asTextList(item))
+      .map((item) => String(item).trim())
+      .filter(Boolean)
+      .slice(0, 8);
+  }
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, item]) => `${key}：${item}`)
+      .map((item) => String(item).trim())
+      .filter(Boolean)
+      .slice(0, 8);
+  }
+  return String(value)
+    .split(/\n|；|;/)
+    .map((item) => item.replace(/^[-*]\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
 }
 
 function safeJson(content) {
@@ -261,7 +430,11 @@ ${SHARED_SAFETY_RULES}
 {
   "summary": "一句话总结画像和证据判断",
   "profile_analysis": "用户当前状态、风险边界和分群理解",
-  "evidence_review": "采纳哪些证据、过滤哪些证据、为什么"
+  "profile_claims": ["画像判断1", "画像判断2", "画像判断3"],
+  "evidence_review": "采纳哪些证据、过滤哪些证据、为什么",
+  "evidence_used": ["采纳证据及理由1", "采纳证据及理由2"],
+  "filtered_out": ["被过滤信息及理由1", "被过滤信息及理由2"],
+  "questions_for_next_agent": ["需要食养建议师处理的疑点或约束"]
 }
 `;
 
@@ -274,9 +447,15 @@ ${SHARED_SAFETY_RULES}
 {
   "summary": "一句话说明推荐方向",
   "recommended_title": "候选名称",
+  "response_to_evidence": "回应画像与证据组的关键判断",
+  "proposal": "推荐方案正文",
   "recommendation_summary": "为什么推荐它",
+  "why_this_fits": ["匹配用户档案/证据的理由1", "理由2"],
+  "today_steps": ["今天第一步", "今天第二步", "今天第三步"],
   "companion_plan": "今天可以怎么做，语气要温和",
-  "avoid": "需要避开的情况"
+  "alternatives": ["低风险替代方案1", "低风险替代方案2"],
+  "avoid": ["需要避开的情况1", "需要避开的情况2"],
+  "questions_for_safety": ["请安全审查师重点复核的风险点"]
 }
 `;
 
@@ -297,7 +476,21 @@ ${SHARED_SAFETY_RULES}
   "summary": "一句话总结安全和合规处理",
   "safety_verdict": "pass 或 caution 或 block",
   "risk_review": "主要风险点或通过理由",
+  "objections": ["对前一轮建议的反驳或风险质疑1", "反驳2"],
+  "required_changes": ["最终答案必须修正/保留的点1", "修正点2"],
   "compliance_review": "你做了哪些合规处理",
+  "final_report": {
+    "headline": "一句有信息量的结论标题",
+    "recommendation": "最终建议",
+    "rationale": ["依据1", "依据2", "依据3"],
+    "action_plan": ["今天怎么做1", "今天怎么做2", "今天怎么做3"],
+    "avoid": ["不建议做什么1", "不建议做什么2"],
+    "watch_signals": ["观察指标或何时咨询医生1", "观察指标2"],
+    "evidence_used": ["证据名称和用途1", "证据名称和用途2"],
+    "safety_notes": ["安全边界1", "安全边界2"],
+    "confidence": "pass 或 caution 或 block",
+    "follow_up_question": "建议用户明天继续记录的问题"
+  },
   "final_answer": "给用户看的最终回答"
 }
 `;

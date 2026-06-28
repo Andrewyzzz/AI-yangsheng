@@ -335,11 +335,16 @@ function renderAdvisor() {
 
 function renderConversationCard(item, options = {}) {
   const warningClass = item.triage?.blocked || item.triage?.caution ? " warning" : "";
+  const shouldRenderReport = item.finalReport && !options.compact;
   return `
     <article class="card${warningClass}">
       <p class="eyebrow">${formatDate(item.createdAt)} · ${escapeHtml(item.triage?.reason || "顾问团审议")}</p>
       <h3 class="result-title">${escapeHtml(item.question)}</h3>
-      <div class="answer small">${escapeHtml(item.answer)}</div>
+      ${
+        shouldRenderReport
+          ? renderFinalReport(item.finalReport)
+          : `<div class="answer small">${escapeHtml(item.answer)}</div>`
+      }
       <div class="meta-row">
         ${renderLlmBadge(item)}
       </div>
@@ -358,6 +363,69 @@ function renderLlmBadge(item) {
     return `<span class="pill">LLM 增强 · ${escapeHtml(item.llm.model)}</span>`;
   }
   return `<span class="pill">本地回退 · ${escapeHtml(item.llm.reason || "未配置 API")}</span>`;
+}
+
+function asArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  return String(value)
+    .split(/\n|；|;/)
+    .map((item) => item.replace(/^[-*]\s*/, "").trim())
+    .filter(Boolean);
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(Number(ms))) return "";
+  const seconds = Number(ms) / 1000;
+  return seconds >= 1 ? `${seconds.toFixed(1)}s` : `${Math.round(Number(ms))}ms`;
+}
+
+function renderList(items, className = "") {
+  const list = asArray(items);
+  if (!list.length) return "";
+  return `<ul class="insight-list ${className}">${list.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function renderFinalReport(report) {
+  const confidenceLabel = {
+    pass: "低风险通过",
+    caution: "谨慎建议",
+    block: "建议转专业判断"
+  }[report.confidence] || report.confidence || "审议完成";
+
+  return `
+    <div class="final-report">
+      <div class="final-hero">
+        <span class="score">${escapeHtml(confidenceLabel)}</span>
+        <h4>${escapeHtml(report.headline || "顾问团完成审议")}</h4>
+        <p>${escapeHtml(report.recommendation || "")}</p>
+      </div>
+      <div class="report-grid">
+        ${renderReportPanel("为什么这样建议", report.rationale)}
+        ${renderReportPanel("今天怎么做", report.actionPlan)}
+        ${renderReportPanel("需要避开的情况", report.avoid)}
+        ${renderReportPanel("观察指标", report.watchSignals)}
+        ${renderReportPanel("采用的证据", report.evidenceUsed)}
+        ${renderReportPanel("安全边界", report.safetyNotes)}
+      </div>
+      ${
+        report.followUpQuestion
+          ? `<div class="follow-up-note"><strong>下次继续观察</strong><span>${escapeHtml(report.followUpQuestion)}</span></div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderReportPanel(title, items) {
+  const list = asArray(items);
+  if (!list.length) return "";
+  return `
+    <section class="report-panel">
+      <h5>${escapeHtml(title)}</h5>
+      ${renderList(list)}
+    </section>
+  `;
 }
 
 function renderEvidence(item) {
@@ -386,29 +454,77 @@ function renderEvidence(item) {
 }
 
 function renderDebate(item) {
+  const metrics = item.debate?.metrics;
   return `
-    <h2 class="section-title">后台 Debate 审议</h2>
+    <h2 class="section-title">AI Debate 审议过程</h2>
+    ${
+      metrics
+        ? `<section class="debate-metrics">
+            <div><span>模式</span><strong>${escapeHtml(metrics.mode || "多 Agent debate")}</strong></div>
+            <div><span>总耗时</span><strong>${escapeHtml(formatDuration(metrics.totalMs) || "--")}</strong></div>
+            <div><span>结论</span><strong>${escapeHtml(metrics.finalVerdict || "完成")}</strong></div>
+          </section>`
+        : ""
+    }
     <section class="debate-list">
       ${item.debate.rounds
-        .map(
-          (round) => `
+        .map((round, index) => `
             <article class="debate-item">
               <div class="debate-head">
-                <strong>${escapeHtml(round.name)}</strong>
-                <span class="score">${round.entries.length} 条</span>
+                <div>
+                  <strong>${escapeHtml(round.name)}</strong>
+                  ${round.summary ? `<p class="small muted">${escapeHtml(round.summary)}</p>` : ""}
+                </div>
+                <span class="score">${escapeHtml(formatDuration(round.durationMs) || `${round.entries.length} 条`)}</span>
               </div>
-              ${round.entries
-                .map(
-                  (entry) => `
-                    <p class="small"><strong>${escapeHtml(entry.agent)}</strong> · ${escapeHtml(entry.stance)}<br>${escapeHtml(entry.content)}</p>
-                  `
-                )
-                .join("")}
+              <div class="agent-debate-grid">
+                ${(round.entries || []).map((entry) => renderDebateEntry(entry, index)).join("")}
+              </div>
             </article>
-          `
-        )
+          `)
         .join("")}
     </section>
+  `;
+}
+
+function renderDebateEntry(entry, index) {
+  const initials = String(entry.agent || "?").slice(0, 2);
+  const secondary = [
+    entry.roleGroup,
+    entry.model,
+    entry.responseToPrevious ? "回应上一轮" : ""
+  ].filter(Boolean).join(" · ");
+
+  return `
+    <article class="agent-debate-card" style="--delay:${index * 70}ms">
+      <div class="agent-debate-head">
+        <div class="agent-avatar">${escapeHtml(initials)}</div>
+        <div>
+          <strong>${escapeHtml(entry.agent || "顾问")}</strong>
+          <span>${escapeHtml(entry.stance || "审议")}</span>
+        </div>
+      </div>
+      ${secondary ? `<p class="micro muted">${escapeHtml(secondary)}</p>` : ""}
+      <p class="small">${escapeHtml(entry.content || "")}</p>
+      ${entry.responseToPrevious ? `<div class="debate-note"><strong>回应上一轮</strong><span>${escapeHtml(entry.responseToPrevious)}</span></div>` : ""}
+      ${renderEntrySection("论点", entry.bullets)}
+      ${renderEntrySection("采纳", entry.accepted)}
+      ${renderEntrySection("质疑", entry.challenged)}
+      ${renderEntrySection("必须修正", entry.requiredChanges)}
+      ${renderEntrySection("备选", entry.alternatives)}
+      ${renderEntrySection("追问", entry.questions)}
+    </article>
+  `;
+}
+
+function renderEntrySection(title, items) {
+  const list = asArray(items);
+  if (!list.length) return "";
+  return `
+    <div class="entry-section">
+      <span>${escapeHtml(title)}</span>
+      ${renderList(list)}
+    </div>
   `;
 }
 
