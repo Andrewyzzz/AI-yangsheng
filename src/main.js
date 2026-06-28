@@ -285,7 +285,7 @@ function renderAdvisor() {
     ${renderHeader("问问 AI 养生顾问团")}
 
     <section class="soft-card">
-      <p class="subtitle">顾问团会先读取你的档案和打卡，再检索证据、过滤干扰资料，最后由 3 个 LLM agent 审议：食养建议、安全审查、合规定稿。未配置 API key 时会自动使用本地引擎。</p>
+      <p class="subtitle">顾问团会先读取你的档案和打卡，再检索证据、过滤干扰资料，最后由 3 个 LLM 席位模拟 6 个顾问角色：画像证据、食养陪伴、安全合规。未配置 API key 时会自动使用本地引擎。</p>
     </section>
 
     <h2 class="section-title">专家席位</h2>
@@ -316,7 +316,7 @@ function renderAdvisor() {
 
     ${
       isThinking
-        ? `<div class="card" style="margin-top:22px"><p class="eyebrow">AI Council</p><h3 class="result-title">顾问团正在审议</h3><p class="small muted">本地规则已完成预审，正在等待 LLM agent 输出建议、反驳和合规定稿。</p></div>`
+        ? `<div class="card" style="margin-top:22px"><p class="eyebrow">AI Council</p><h3 class="result-title">顾问团正在审议</h3><p class="small muted">本地规则已完成预审，正在等待 3 个 LLM 席位依次输出画像证据、食养陪伴、安全合规定稿。</p></div>`
         : ""
     }
 

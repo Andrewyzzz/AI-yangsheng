@@ -3,7 +3,7 @@ const COUNCIL_ENDPOINT = "/api/council";
 export async function enhanceCouncilResult({ localResult, question, profile, checkins }) {
   try {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 18000);
+    const timeout = window.setTimeout(() => controller.abort(), 60000);
 
     const response = await fetch(COUNCIL_ENDPOINT, {
       method: "POST",
