@@ -485,12 +485,21 @@ function renderEvidence(item) {
 
 function renderDebate(item) {
   const metrics = item.debate?.metrics;
+  const rounds = item.debate?.rounds || [];
+  const localRounds = rounds.filter((round) => String(round.name || "").startsWith("本地预审"));
+  const llmRounds = rounds.filter((round) => String(round.name || "").startsWith("LLM Round"));
+  const visibleRounds = llmRounds.length
+    ? llmRounds
+    : localRounds.length
+      ? localRounds.slice(-1)
+      : rounds;
   const fallbackNotice = item.llm?.mode === "local"
     ? `<section class="debate-fallback"><strong>当前只显示本地预审</strong><span>真实 LLM 多轮 debate 未完成或当前记录是旧记录。原因：${escapeHtml(item.llm.reason || "未配置或未返回")}。重新提问会再次尝试调用 LLM Round 1-4。</span></section>`
     : "";
   return `
     <h2 class="section-title">AI Debate 审议过程</h2>
     ${fallbackNotice}
+    ${renderPreflightSummary(localRounds, Boolean(llmRounds.length))}
     ${
       metrics
         ? `<section class="debate-metrics">
@@ -501,7 +510,7 @@ function renderDebate(item) {
         : ""
     }
     <section class="debate-list">
-      ${item.debate.rounds
+      ${visibleRounds
         .map((round, index) => `
             <article class="debate-item">
               <div class="debate-head">
@@ -517,6 +526,25 @@ function renderDebate(item) {
             </article>
           `)
         .join("")}
+    </section>
+  `;
+}
+
+function renderPreflightSummary(rounds, hasLlmRounds) {
+  if (!rounds.length) return "";
+  const entryCount = rounds.reduce((sum, round) => sum + (round.entries?.length || 0), 0);
+  const lastRound = rounds[rounds.length - 1];
+  const summary = hasLlmRounds
+    ? "本地预审已压缩，只作为画像、证据和安全边界准备；主审议请看下面的 LLM Round。"
+    : "真实 LLM debate 未返回，已隐藏本地前置细节，只保留本地统一结论供临时参考。";
+  return `
+    <section class="preflight-summary">
+      <div>
+        <strong>本地预审</strong>
+        <span>${escapeHtml(rounds.length)} 轮 · ${escapeHtml(entryCount)} 条</span>
+      </div>
+      <p>${escapeHtml(summary)}</p>
+      ${lastRound?.summary ? `<p class="micro muted">${escapeHtml(lastRound.summary)}</p>` : ""}
     </section>
   `;
 }

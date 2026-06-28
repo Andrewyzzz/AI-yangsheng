@@ -524,6 +524,36 @@ button {
   line-height: 1.55;
 }
 
+.preflight-summary {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px dashed rgba(49, 95, 74, 0.28);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.preflight-summary div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.preflight-summary strong {
+  color: var(--sage-dark);
+  font-size: 13px;
+}
+
+.preflight-summary span,
+.preflight-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .debate-metrics div {
   display: grid;
   gap: 4px;
