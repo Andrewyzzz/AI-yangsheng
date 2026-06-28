@@ -309,6 +309,24 @@ button {
   line-height: 1.75;
 }
 
+.paragraph-stack,
+.answer-text {
+  display: grid;
+  gap: 10px;
+}
+
+.paragraph-stack p,
+.answer-text p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.82;
+}
+
+.report-narrative {
+  padding: 2px 0 4px;
+}
+
 .report-grid {
   display: grid;
   gap: 12px;
@@ -432,6 +450,29 @@ button {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.55;
+}
+
+.evidence-use {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-left: 3px solid rgba(49, 95, 74, 0.38);
+  border-radius: 12px;
+  background: rgba(230, 238, 231, 0.48);
+}
+
+.evidence-use span {
+  color: var(--sage-dark);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.evidence-use p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.62;
 }
 
 .evidence-item,

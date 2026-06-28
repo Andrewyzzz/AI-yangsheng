@@ -78,7 +78,7 @@ export async function onRequestPost(context) {
       localResult,
       timings
     });
-    const answer = sanitizeAnswer(finalOutput.final_answer || formatFinalAnswer(finalReport) || localResult.answer);
+    const answer = sanitizeAnswer(formatFinalAnswer(finalReport) || finalOutput.final_answer || localResult.answer);
     const modelSummary = summarizeSlots(slots);
     const debate = buildConvergenceDebate({
       localResult,
@@ -111,8 +111,19 @@ function buildContextBundle(payload) {
     triage: localResult.triage,
     segments: localResult.segments,
     accepted_evidence: localResult.evidence.filter((item) => item.raftDecision === "accept").slice(0, 5),
+    evidence_adoption: localResult.evidence
+      .filter((item) => item.raftDecision === "accept")
+      .slice(0, 5)
+      .map((item) => ({
+        title: item.title,
+        source: item.source,
+        reason: item.raftReason,
+        used_for: item.raftUse || item.content,
+        safety: item.safety
+      })),
     filtered_evidence: localResult.evidence.filter((item) => item.raftDecision === "filter").slice(0, 3),
     ranked_candidates: (localResult.ranked || []).slice(0, 5),
+    local_final_report: localResult.finalReport,
     local_answer: localResult.answer
   };
 }
@@ -403,6 +414,11 @@ function buildFinalReport({ finalOutput, rounds, localResult, timings }) {
       localReport.rationale,
       finalEntries.flatMap((entry) => asTextList(entry.consensus || entry.accepted || entry.bullets)).slice(0, 5)
     ),
+    narrative: mergeReportList(
+      llmReport.narrative || llmReport.paragraphs || llmReport.explanation_paragraphs || llmReport.explanationParagraphs,
+      localReport.narrative,
+      [finalOutput.consensus_summary, finalOutput.summary].filter(Boolean)
+    ),
     actionPlan: mergeReportList(
       llmReport.action_plan || llmReport.actionPlan,
       localReport.actionPlan,
@@ -438,6 +454,7 @@ function formatFinalAnswer(report) {
   if (!report) return "";
   const lines = [
     `顾问团综合建议：${report.recommendation}`,
+    report.narrative?.length ? report.narrative.join("\n\n") : "",
     report.rationale?.length ? `为什么这样建议：${report.rationale.join("；")}` : "",
     report.actionPlan?.length ? `今天怎么做：${report.actionPlan.join("；")}` : "",
     report.avoid?.length ? `需要避开的情况：${report.avoid.join("；")}` : "",
@@ -547,7 +564,7 @@ const SAFETY_COMPLIANCE_SYSTEM = `
 ${SHARED_SAFETY_RULES}
 最终回答结构：
 顾问团综合建议
-为什么这样建议
+为什么这样建议：先用 2-3 个自然段讲清楚判断过程和证据如何进入结论
 今天怎么做
 需要避开的情况
 本建议仅为养生参考，不能替代医生判断或医疗处置。
@@ -563,7 +580,7 @@ const ROUND_OUTPUT_CONTRACT = `
       "stance": "本轮立场或裁决",
       "content": "完整发言，说明推理和结论",
       "bullets": ["关键论点1", "关键论点2"],
-      "accepted": ["采纳的证据、观点或共识"],
+      "accepted": ["采纳的证据、观点或共识，并说明它如何改变建议"],
       "challenged": ["质疑的证据、观点或风险"],
       "required_changes": ["要求下一轮或最终答案修正的点"],
       "alternatives": ["可选替代建议"],
@@ -602,12 +619,18 @@ const ROUND3_INSTRUCTION = `
 - 说明你放弃或保留了哪些观点；
 - 给出最终可接受方案和仍需保留的分歧；
 - 用 consensus 字段写下你同意进入最终答案的共识。
+Round 3 不能写得太薄，每个角色都要明确写出“上一轮意见如何改变了我的最终建议”。
 ${ROUND_OUTPUT_CONTRACT}
 `;
 
 const FINAL_SYNTHESIS_INSTRUCTION = `
 这是最终聚合轮。你代表安全审查师和合规编辑读取 previous_rounds，将 6 个角色从分散意见收敛成统一结论。
 必须体现：哪些分歧被解决、哪些风险被保留、最终建议如何因 debate 被修改。
+最终回答不能只有一点一点的清单，必须先有 2-3 个自然段说明：
+- 顾问团如何理解用户问题；
+- RAG/RAFT 采纳了哪些证据，以及每条证据如何改变最终建议；
+- 为什么从分散意见收敛到当前方案。
+清单只用于“今天怎么做”“观察什么”“需要避开什么”。
 最终报告必须具体，不能只写“记录具体症状”。如果用户问上火、口干、嗓子痒、喉咙不适，action_plan 至少包含：
 - 今天饮水/饮品怎么调整；
 - 饮食刺激物怎么减少；
@@ -632,6 +655,7 @@ watch_signals 至少包含：
   "final_report": {
     "headline": "一句有信息量的结论标题",
     "recommendation": "最终建议",
+    "narrative": ["自然段1：解释问题理解和画像", "自然段2：解释 RAG 证据如何被采纳", "自然段3：解释从分歧到统一的过程"],
     "rationale": ["依据1", "依据2", "依据3"],
     "action_plan": ["今天怎么做1", "今天怎么做2", "今天怎么做3"],
     "avoid": ["不建议做什么1", "不建议做什么2"],
@@ -641,7 +665,7 @@ watch_signals 至少包含：
     "confidence": "pass 或 caution 或 block",
     "follow_up_question": "建议用户明天继续记录的问题"
   },
-  "final_answer": "给用户看的最终回答"
+  "final_answer": "给用户看的最终回答，先写自然段，再写必要清单"
 }
 `;
 

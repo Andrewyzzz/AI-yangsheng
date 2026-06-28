@@ -343,7 +343,7 @@ function renderConversationCard(item, options = {}) {
       ${
         shouldRenderReport
           ? renderFinalReport(item.finalReport)
-          : `<div class="answer small">${escapeHtml(item.answer)}</div>`
+          : renderAnswerText(item.answer)
       }
       <div class="meta-row">
         ${renderLlmBadge(item)}
@@ -386,6 +386,21 @@ function renderList(items, className = "") {
   return `<ul class="insight-list ${className}">${list.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
+function renderParagraphs(items, className = "") {
+  const list = asArray(items);
+  if (!list.length) return "";
+  return `<div class="paragraph-stack ${className}">${list.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>`;
+}
+
+function renderAnswerText(text) {
+  const paragraphs = String(text || "")
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!paragraphs.length) return "";
+  return `<div class="answer-text">${paragraphs.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>`;
+}
+
 function renderFinalReport(report) {
   const confidenceLabel = {
     pass: "低风险通过",
@@ -400,6 +415,7 @@ function renderFinalReport(report) {
         <h4>${escapeHtml(report.headline || "顾问团完成审议")}</h4>
         <p>${escapeHtml(report.recommendation || "")}</p>
       </div>
+      ${renderParagraphs(report.narrative || report.paragraphs || report.explanationParagraphs, "report-narrative")}
       <div class="report-grid">
         ${renderReportPanel("为什么这样建议", report.rationale)}
         ${renderReportPanel("今天怎么做", report.actionPlan)}
@@ -453,6 +469,12 @@ function renderEvidence(item) {
                 <span class="score">${doc.relevanceScore}/10</span>
               </div>
               <p class="small">${escapeHtml(doc.raftReason)}</p>
+              ${
+                doc.raftUse
+                  ? `<div class="evidence-use"><span>进入建议</span><p>${escapeHtml(doc.raftUse)}</p></div>`
+                  : ""
+              }
+              ${doc.content ? `<p class="small muted">${escapeHtml(doc.content)}</p>` : ""}
             </article>
           `
         )

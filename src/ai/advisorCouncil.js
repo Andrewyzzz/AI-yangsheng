@@ -61,6 +61,66 @@ function profileKeywords(profile = {}, checkins = []) {
   return words.filter(Boolean);
 }
 
+function uniqueList(items, limit = 6) {
+  const seen = new Set();
+  return items
+    .flat()
+    .map((item) => String(item || "").trim())
+    .filter((item) => {
+      const normalized = item.replace(/\s+/g, "");
+      if (!normalized || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    })
+    .slice(0, limit);
+}
+
+function firstSentence(text) {
+  return String(text || "")
+    .split(/[。；]/)
+    .map((item) => item.trim())
+    .find(Boolean) || "";
+}
+
+function buildEvidenceUse(doc) {
+  if (doc.id === "habit-irritation") {
+    return "用于把“上火”先拆成口干、嗓子不适和刺激诱因观察，并把建议收敛为温水补液、减少辛辣油炸酒精、注意湿度和用嗓休息。";
+  }
+  if (doc.id === "food-pear-tremella") {
+    return "用于支持银耳雪梨汤或温梨水作为可选温和汤水，同时限定为小碗、不额外加糖，并保留血糖和胃肠边界。";
+  }
+  if (doc.id === "guide-balanced-meal") {
+    return "用于保留正常主食、蔬菜和蛋白，不把日常不适引向极端忌口或盲目进补。";
+  }
+  if (doc.type === "safety") {
+    return `用于设置安全边界：${firstSentence(doc.safety || doc.content)}`;
+  }
+  return `用于提供${doc.type || "知识库"}参考：${firstSentence(doc.content)}`;
+}
+
+function evidenceAdoptionLines(docs, limit = 3) {
+  return docs
+    .slice(0, limit)
+    .map((doc) => `${doc.title}：${doc.raftUse || buildEvidenceUse(doc)}`);
+}
+
+function buildNarrative({ focus, topTitle, accepted, recentSummary, segments, warnings, contraindications }) {
+  const evidenceBridge = accepted.length
+    ? evidenceAdoptionLines(accepted, 3).map((line) => line.replace(/[。；;]+$/, "")).join("；")
+    : "本轮没有强相关 RAG 资料进入建议，因此只保留基础安全规则和低风险观察。";
+  const statusLine = segments.length ? segments.join("、") : "日常养生观察";
+  const safetyLine = uniqueList([
+    ...warnings,
+    ...contraindications.map((item) => `个人边界：${item}`)
+  ], 4).join("；");
+
+  return [
+    `顾问团先把这个问题放在「${focus.label}」里看，而不是直接判断身体哪里出了问题。你目前的近期记录是「${recentSummary}」，系统可识别标签为「${statusLine}」，所以建议从低风险、可观察的生活调整开始。`,
+    `RAG/RAFT 在这里采用“少而准”的策略，只让高相关证据进入结论：${evidenceBridge}。这些证据共同把建议从“泛泛吃点什么”收敛到「${topTitle || focus.label}」这条主线。`,
+    `最终方案会同时保留两件事：今天能执行的温和调整，以及明天可以反馈给顾问团的症状记录。${safetyLine ? `安全边界也会一起放进去，尤其是${safetyLine}。` : "如果后续出现明显加重或急性信号，需要及时咨询医生。"}`
+  ];
+}
+
 function scoreDocument(doc, question, profile, checkins) {
   const q = question.toLowerCase();
   const profileWords = profileKeywords(profile, checkins);
@@ -118,7 +178,8 @@ function scoreDocument(doc, question, profile, checkins) {
     ...doc,
     relevanceScore: Math.min(10, score),
     raftDecision: score >= 4 ? "accept" : "filter",
-    raftReason: reasons.length ? reasons.slice(0, 3).join("；") : "与当前问题和档案关联较弱"
+    raftReason: reasons.length ? reasons.slice(0, 3).join("；") : "与当前问题和档案关联较弱",
+    raftUse: score >= 4 ? buildEvidenceUse(doc) : ""
   };
 }
 
@@ -256,10 +317,20 @@ function buildAnswer({ question, triage, profile, checkins, evidence, ranked, se
   const actionSteps = top.type === "habit"
     ? focus.actionPlan.slice(0, 4)
     : [top.content, ...focus.actionPlan.slice(0, 2)];
+  const narrative = buildNarrative({
+    focus,
+    topTitle,
+    accepted,
+    recentSummary,
+    segments,
+    warnings,
+    contraindications
+  });
 
   const answer = [
     `顾问团综合建议：今天优先做「${topTitle}」。`,
-    `为什么：你的近期记录是 ${recentSummary}，当前标签倾向于 ${segments.join("、") || "日常养生观察"}；本次采纳了 ${evidenceLine || "内部安全规则库"} 作为依据。`,
+    ...narrative,
+    `简单说，本次采纳了 ${evidenceLine || "内部安全规则库"} 作为依据。`,
     `怎么做：${actionSteps.join("；")}。`,
     `观察什么：${focus.watchSignals.slice(0, 3).join("；")}。`,
     cautionLine,
@@ -303,8 +374,17 @@ function buildFinalReport({ question, triage, profile, checkins, evidence, ranke
   return {
     headline: top ? `今天先做「${topTitle}」` : `先做${focus.label}`,
     recommendation: top
-      ? `以「${topTitle}」作为今天的主要建议，同时按${focus.label}记录诱因和变化。`
+      ? `以「${topTitle}」作为今天的主线：先做温和调整，再按症状、诱因和环境记录变化。`
       : `先按${focus.label}做低风险调整，并记录具体症状。`,
+    narrative: buildNarrative({
+      focus,
+      topTitle,
+      accepted,
+      recentSummary,
+      segments,
+      warnings,
+      contraindications
+    }),
     rationale: [
       `问题焦点：${focus.label}`,
       `近期记录：${recentSummary}`,
@@ -325,7 +405,7 @@ function buildFinalReport({ question, triage, profile, checkins, evidence, ranke
       ...contraindications.map((item) => `注意个人边界：${item}`)
     ].slice(0, 5),
     watchSignals: focus.watchSignals,
-    evidenceUsed: accepted.slice(0, 4).map((doc) => `${doc.title}：${doc.raftReason}`),
+    evidenceUsed: evidenceAdoptionLines(accepted, 4),
     safetyNotes: warnings.length ? warnings : ["本地安全审查未发现明显硬性冲突"],
     confidence: triage.caution ? "caution" : "pass",
     followUpQuestion: focus.followUpQuestion
@@ -338,6 +418,15 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
   const filtered = evidence.filter((doc) => doc.raftDecision === "filter");
   const top = ranked[0];
   const safetyWarnings = ranked.flatMap((item) => item.safety.warnings);
+  const contraindications = deriveContraindications({ ...profile, questionContext: question });
+  const evidenceLines = evidenceAdoptionLines(accepted, 3);
+  const safeChallenges = uniqueList([...safetyWarnings, ...focus.watchSignals], 5);
+  const planSteps = top
+    ? [
+        ...(top.type === "habit" ? [] : [top.content]),
+        ...focus.actionPlan.slice(0, 4)
+      ]
+    : focus.actionPlan.slice(0, 4);
 
   return {
     agents: AGENTS,
@@ -361,7 +450,7 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
             content: accepted.length
               ? `检索 ${evidence.length} 条资料，采纳 ${accepted.length} 条与当前问题最相关的资料，过滤 ${filtered.length} 条低相关资料。`
               : `检索 ${evidence.length} 条资料，未找到强相关证据；低相关资料不展开，避免让 RAG 噪声主导建议。`,
-            accepted: accepted.slice(0, 2).map((doc) => `${doc.title}：${doc.raftReason}`),
+            accepted: evidenceLines.slice(0, 2),
             challenged: filtered.length ? [`已过滤 ${filtered.length} 条低相关资料，不进入最终建议。`] : []
           },
           {
@@ -399,6 +488,47 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
         name: "Round 3 综合输出",
         entries: [
           {
+            agent: "画像分析师",
+            stance: "画像收敛",
+            content: `接受安全反驳后，画像侧不把“上火”当作诊断结论，而是收敛为「${focus.label}」和可记录诱因。`,
+            revisions: [
+              `从泛化描述改成${focus.label}`,
+              `保留档案边界：${contraindications.join("、") || "暂无硬性禁忌"}`,
+              "把后续追问聚焦到症状频率、持续时间和诱因"
+            ],
+            consensus: [`最终答案应围绕${focus.label}，不做疾病判断`]
+          },
+          {
+            agent: "证据检索师",
+            stance: "证据落地",
+            content: accepted.length
+              ? "本轮不再只展示证据标题，而是把采纳证据转译成最终建议中的具体动作和边界。"
+              : "没有强相关证据时，最终答案需要明确说明证据不足，并只做基础观察建议。",
+            accepted: evidenceLines,
+            challenged: filtered.length ? [`${filtered.length} 条低相关资料继续过滤，不进入行动方案。`] : [],
+            consensus: ["最终答案必须说明证据如何影响建议，而不只是列出 RAG 标题"]
+          },
+          {
+            agent: "食养建议师",
+            stance: "方案修正",
+            content: top
+              ? `食养方案从“推荐一个食谱”修正为「${top.type === "habit" ? focus.label : top.title}」主线，并允许温和饮品作为辅助。`
+              : `食谱证据不足时，不强推食谱，改为${focus.label}的生活方式方案。`,
+            revisions: planSteps,
+            alternatives: ranked.slice(1, 3).map((item) => `${item.title}：作为备选，不替代主线`),
+            consensus: ["先做温和调整，不盲目进补，不用刺激性食物压过去"]
+          },
+          {
+            agent: "安全审查师",
+            stance: "边界收窄",
+            content: safeChallenges.length
+              ? "安全侧要求最终答案把过敏、加重信号和就医边界写进同一套建议。"
+              : "安全侧允许低风险生活方式建议，但仍要求保留持续加重时咨询医生的边界。",
+            challenged: safeChallenges,
+            requiredChanges: ["不承诺结果", "不把食养建议当成医疗处置", "出现急性或持续加重信号时转向专业判断"],
+            consensus: ["建议可以给，但必须带观察指标和停止自我处理的边界"]
+          },
+          {
             agent: "陪伴教练",
             stance: "今日可执行",
             content: top
@@ -407,6 +537,13 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
             bullets: top
               ? ["先少量尝试", ...focus.watchSignals.slice(0, 3), "下次用反馈修正建议"]
               : [...focus.actionPlan.slice(0, 3), ...focus.watchSignals.slice(0, 2)]
+          },
+          {
+            agent: "合规编辑",
+            stance: "统一话术",
+            content: "最终回答需要先用段落讲清楚判断过程，再用清单承接今天怎么做，避免只有碎片化 bullet。",
+            requiredChanges: ["用自然段解释 RAG 如何进入结论", "清单只承担执行步骤和观察指标", "保留养生参考边界"],
+            consensus: ["段落负责解释，清单负责执行；两者都要保留"]
           }
         ]
       }
