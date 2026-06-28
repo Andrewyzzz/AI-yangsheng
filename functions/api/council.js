@@ -22,54 +22,68 @@ export async function onRequestPost(context) {
     const contextBundle = buildContextBundle(payload);
     const startedAt = Date.now();
 
-    const profileEvidenceResult = await timedAgentCall({
-      slot: slots[0],
-      contextBundle
+    const round1 = await runDebateRound({
+      name: "Round 4 LLM 全员独立判断",
+      phase: "independent_analysis",
+      slots,
+      contextBundle,
+      instruction: ROUND1_INSTRUCTION
     });
-    const profileEvidence = profileEvidenceResult.output;
 
-    const foodCompanionResult = await timedAgentCall({
-      slot: slots[1],
+    const round2 = await runDebateRound({
+      name: "Round 5 LLM 交叉反驳",
+      phase: "cross_rebuttal",
+      slots,
       contextBundle: {
         ...contextBundle,
-        profile_evidence_output: profileEvidence
-      }
+        previous_rounds: [round1.round]
+      },
+      instruction: ROUND2_INSTRUCTION
     });
-    const foodCompanion = foodCompanionResult.output;
 
-    const safetyComplianceResult = await timedAgentCall({
+    const round3 = await runDebateRound({
+      name: "Round 6 LLM 修正收敛",
+      phase: "revision_and_convergence",
+      slots,
+      contextBundle: {
+        ...contextBundle,
+        previous_rounds: [round1.round, round2.round]
+      },
+      instruction: ROUND3_INSTRUCTION
+    });
+
+    const finalResult = await timedAgentCall({
       slot: slots[2],
       contextBundle: {
         ...contextBundle,
-        profile_evidence_output: profileEvidence,
-        food_companion_output: foodCompanion
-      }
+        previous_rounds: [round1.round, round2.round, round3.round]
+      },
+      instruction: FINAL_SYNTHESIS_INSTRUCTION,
+      taskLabel: "统一结论"
     });
-    const safetyCompliance = safetyComplianceResult.output;
+    const finalOutput = finalResult.output;
 
     const timings = {
       totalMs: Date.now() - startedAt,
       slots: [
-        profileEvidenceResult.timing,
-        foodCompanionResult.timing,
-        safetyComplianceResult.timing
+        ...round1.timings,
+        ...round2.timings,
+        ...round3.timings,
+        finalResult.timing
       ]
     };
     const finalReport = buildFinalReport({
-      safetyCompliance,
-      foodCompanion,
-      profileEvidence,
+      finalOutput,
+      rounds: [round1.round, round2.round, round3.round],
       localResult,
       timings
     });
-    const answer = sanitizeAnswer(safetyCompliance.final_answer || formatFinalAnswer(finalReport) || localResult.answer);
+    const answer = sanitizeAnswer(finalOutput.final_answer || formatFinalAnswer(finalReport) || localResult.answer);
     const modelSummary = summarizeSlots(slots);
-    const debate = buildLlmDebate({
+    const debate = buildConvergenceDebate({
       localResult,
-      slots,
-      profileEvidence,
-      foodCompanion,
-      safetyCompliance,
+      rounds: [round1.round, round2.round, round3.round],
+      finalOutput,
       timings,
       finalReport
     });
@@ -138,9 +152,39 @@ function summarizeSlots(slots) {
     .join(" · ");
 }
 
-async function timedAgentCall({ slot, contextBundle }) {
+async function runDebateRound({ name, phase, slots, contextBundle, instruction }) {
+  const startedAt = Date.now();
+  const results = await Promise.all(
+    slots.map((slot) =>
+      timedAgentCall({
+        slot,
+        contextBundle,
+        instruction,
+        taskLabel: name
+      })
+    )
+  );
+  const entries = results.flatMap(({ output }, index) => normalizeRoundEntries(output, slots[index]));
+  return {
+    round: {
+      name,
+      phase,
+      summary: results.map(({ output }) => output.summary).filter(Boolean).join("；"),
+      durationMs: Date.now() - startedAt,
+      entries
+    },
+    timings: results.map((result) => ({
+      ...result.timing,
+      round: name,
+      phase
+    })),
+    outputs: results.map((result) => result.output)
+  };
+}
+
+async function timedAgentCall({ slot, contextBundle, instruction, taskLabel }) {
   const start = Date.now();
-  const output = await callAgent({ slot, contextBundle });
+  const output = await callAgent({ slot, contextBundle, instruction });
   return {
     output,
     timing: {
@@ -149,12 +193,13 @@ async function timedAgentCall({ slot, contextBundle }) {
       role: slot.role,
       provider: slot.provider,
       model: slot.model,
+      task: taskLabel || slot.label,
       durationMs: Date.now() - start
     }
   };
 }
 
-async function callAgent({ slot, contextBundle }) {
+async function callAgent({ slot, contextBundle, instruction }) {
   const response = await fetch(`${slot.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -172,7 +217,12 @@ async function callAgent({ slot, contextBundle }) {
           content: JSON.stringify(
             {
               role: slot.role,
-              instructions: "只输出 JSON，不要 Markdown。不要新增未在证据或候选中出现的食材/补剂。所有建议必须是养生参考，不得替代医疗判断。",
+              instructions: [
+                "只输出 JSON，不要 Markdown。",
+                "不要新增未在证据、候选或用户档案中出现的食材/补剂。",
+                "所有建议必须是养生参考，不得替代医疗判断。",
+                instruction || ""
+              ].filter(Boolean).join("\n"),
               context: contextBundle
             },
             null,
@@ -193,96 +243,124 @@ async function callAgent({ slot, contextBundle }) {
   return safeJson(content);
 }
 
-function buildLlmDebate({ localResult, slots, profileEvidence, foodCompanion, safetyCompliance, timings, finalReport }) {
+function normalizeRoundEntries(output, slot) {
+  const entries = Array.isArray(output.entries) && output.entries.length
+    ? output.entries
+    : legacyEntriesForSlot(output, slot);
+
+  return entries.map((entry) => ({
+    agent: entry.agent || entry.agent_name || entry.name || slot.role,
+    roleGroup: entry.roleGroup || slot.label,
+    stance: entry.stance || entry.position || entry.verdict || "审议",
+    model: `${slot.provider}/${slot.model}`,
+    content: entry.content || entry.reasoning || entry.summary || output.summary || "",
+    bullets: asTextList(entry.bullets || entry.arguments || entry.key_points || entry.revisions),
+    accepted: asTextList(entry.accepted || entry.evidence_used || entry.accepts),
+    challenged: asTextList(entry.challenged || entry.objections || entry.risks || entry.rejects),
+    revisions: asTextList(entry.revisions || entry.revised_points || entry.revised_recommendation),
+    requiredChanges: asTextList(entry.requiredChanges || entry.required_changes),
+    alternatives: asTextList(entry.alternatives),
+    questions: asTextList(entry.questions || entry.open_questions),
+    responseToPrevious: entry.responseToPrevious || entry.response_to_previous || entry.rebuttal || "",
+    consensus: asTextList(entry.consensus || entry.consensus_points),
+    remainingDisagreement: asTextList(entry.remainingDisagreement || entry.remaining_disagreement),
+    confidence: entry.confidence || entry.safety_verdict || ""
+  }));
+}
+
+function legacyEntriesForSlot(output, slot) {
+  if (slot.key === "profileEvidence") {
+    return [
+      {
+        agent: "画像分析师",
+        stance: "用户画像",
+        content: output.profile_analysis || output.summary,
+        bullets: output.profile_claims,
+        questions: output.questions_for_next_agent
+      },
+      {
+        agent: "证据检索师",
+        stance: "证据复核",
+        content: output.evidence_review || output.summary,
+        accepted: output.evidence_used,
+        challenged: output.filtered_out
+      }
+    ];
+  }
+  if (slot.key === "foodCompanion") {
+    return [
+      {
+        agent: "食养建议师",
+        stance: output.recommended_title || "推荐方案",
+        content: output.recommendation_summary || output.proposal || output.summary,
+        bullets: output.why_this_fits,
+        alternatives: output.alternatives,
+        responseToPrevious: output.response_to_evidence
+      },
+      {
+        agent: "陪伴教练",
+        stance: "执行落地",
+        content: output.companion_plan || output.summary,
+        bullets: output.today_steps,
+        challenged: output.avoid,
+        questions: output.questions_for_safety
+      }
+    ];
+  }
+  return [
+    {
+      agent: "安全审查师",
+      stance: output.safety_verdict || "安全复核",
+      content: output.risk_review || output.summary,
+      challenged: output.objections,
+      requiredChanges: output.required_changes
+    },
+    {
+      agent: "合规编辑",
+      stance: "最终定稿",
+      content: output.compliance_review || output.summary,
+      bullets: output.final_report?.safety_notes
+    }
+  ];
+}
+
+function buildConvergenceDebate({ localResult, rounds, finalOutput, timings, finalReport }) {
   return {
     agents: localResult.debate?.agents || [],
     metrics: {
-      mode: "3 LLM / 6 roles",
+      mode: "Depredict-style multi-round debate",
       totalMs: timings.totalMs,
       slotTimings: timings.slots,
-      finalVerdict: safetyCompliance.safety_verdict || finalReport.confidence || "caution"
+      finalVerdict: finalReport.confidence || finalOutput.safety_verdict || "caution"
     },
     rounds: [
       ...(localResult.debate?.rounds || []),
+      ...rounds,
       {
-        name: "Round 4 LLM 画像与证据",
-        phase: "independent_analysis",
-        summary: profileEvidence.summary || "画像与证据组完成档案读取和 RAG/RAFT 证据复核。",
-        durationMs: timings.slots[0]?.durationMs,
-        entries: [
-          {
-            agent: "画像分析师",
-            roleGroup: slots[0].label,
-            stance: "用户画像",
-            model: `${slots[0].provider}/${slots[0].model}`,
-            content: profileEvidence.profile_analysis || profileEvidence.summary || "已基于档案和近期打卡完成画像分析。",
-            bullets: asTextList(profileEvidence.profile_claims),
-            questions: asTextList(profileEvidence.questions_for_next_agent)
-          },
-          {
-            agent: "证据检索师",
-            roleGroup: slots[0].label,
-            stance: "证据复核",
-            model: `${slots[0].provider}/${slots[0].model}`,
-            content: profileEvidence.evidence_review || "已复核采纳证据和过滤证据的相关性。",
-            accepted: asTextList(profileEvidence.evidence_used),
-            challenged: asTextList(profileEvidence.filtered_out)
-          }
-        ]
-      },
-      {
-        name: "Round 5 LLM 食养与陪伴",
-        phase: "proposal_and_coaching",
-        summary: foodCompanion.summary || "食养与陪伴组基于画像和证据形成可执行建议。",
-        durationMs: timings.slots[1]?.durationMs,
-        entries: [
-          {
-            agent: "食养建议师",
-            roleGroup: slots[1].label,
-            stance: foodCompanion.recommended_title || "推荐方案",
-            model: `${slots[1].provider}/${slots[1].model}`,
-            content: foodCompanion.recommendation_summary || foodCompanion.proposal || foodCompanion.summary || "已基于候选和证据生成建议。",
-            bullets: asTextList(foodCompanion.why_this_fits),
-            alternatives: asTextList(foodCompanion.alternatives),
-            responseToPrevious: foodCompanion.response_to_evidence || ""
-          },
-          {
-            agent: "陪伴教练",
-            roleGroup: slots[1].label,
-            stance: "执行落地",
-            model: `${slots[1].provider}/${slots[1].model}`,
-            content: foodCompanion.companion_plan || "已将建议改写为今天可以执行的小步骤。",
-            bullets: asTextList(foodCompanion.today_steps),
-            challenged: asTextList(foodCompanion.avoid),
-            questions: asTextList(foodCompanion.questions_for_safety)
-          }
-        ]
-      },
-      {
-        name: "Round 6 LLM 安全与合规",
-        phase: "cross_rebuttal_and_final",
-        summary: safetyCompliance.summary || "安全与合规组完成反驳、修正和最终定稿。",
-        durationMs: timings.slots[2]?.durationMs,
+        name: "Round 7 统一结论",
+        phase: "aggregation",
+        summary: finalOutput.consensus_summary || finalOutput.summary || "顾问团完成从分歧到统一的最终整合。",
+        durationMs: timings.slots[timings.slots.length - 1]?.durationMs,
         entries: [
           {
             agent: "安全审查师",
-            roleGroup: slots[2].label,
-            stance: safetyCompliance.safety_verdict || "安全复核",
-            model: `${slots[2].provider}/${slots[2].model}`,
-            content: safetyCompliance.risk_review || "已复核禁忌、慢病、过敏、孕期/经期、用药和急症边界。",
-            challenged: asTextList(safetyCompliance.objections),
-            requiredChanges: asTextList(safetyCompliance.required_changes)
+            roleGroup: "安全与合规组",
+            stance: finalOutput.safety_verdict || finalReport.confidence || "安全裁决",
+            content: finalOutput.risk_review || finalOutput.remaining_disagreement || "已完成风险边界复核。",
+            challenged: asTextList(finalOutput.remaining_disagreement),
+            requiredChanges: asTextList(finalOutput.required_changes || finalReport.safetyNotes),
+            consensus: asTextList(finalOutput.disagreement_resolved)
           },
           {
             agent: "合规编辑",
-            roleGroup: slots[2].label,
-            stance: "最终定稿",
-            model: `${slots[2].provider}/${slots[2].model}`,
-            content: safetyCompliance.compliance_review || safetyCompliance.summary || "已移除医疗判断、效果承诺和不合规表达。",
+            roleGroup: "安全与合规组",
+            stance: "统一结论",
+            content: finalOutput.compliance_review || finalOutput.summary || finalReport.headline,
             bullets: [
               finalReport.recommendation,
               ...(finalReport.safetyNotes || []).slice(0, 2)
-            ].filter(Boolean)
+            ].filter(Boolean),
+            consensus: asTextList(finalOutput.consensus_points || finalReport.rationale)
           }
         ]
       }
@@ -290,31 +368,28 @@ function buildLlmDebate({ localResult, slots, profileEvidence, foodCompanion, sa
   };
 }
 
-function buildFinalReport({ safetyCompliance, foodCompanion, profileEvidence, localResult, timings }) {
-  const llmReport = safetyCompliance.final_report && typeof safetyCompliance.final_report === "object"
-    ? safetyCompliance.final_report
+function buildFinalReport({ finalOutput, rounds, localResult, timings }) {
+  const llmReport = finalOutput.final_report && typeof finalOutput.final_report === "object"
+    ? finalOutput.final_report
     : {};
+  const finalEntries = rounds.flatMap((round) => round.entries || []);
   const acceptedEvidence = localResult.evidence
     .filter((item) => item.raftDecision === "accept")
     .slice(0, 3)
     .map((item) => `${item.title}：${item.raftReason}`);
 
   return {
-    headline: llmReport.headline || safetyCompliance.summary || "顾问团完成审议",
-    recommendation: llmReport.recommendation || foodCompanion.recommended_title || foodCompanion.recommendation_summary || "采用低风险、可执行的生活方式建议。",
+    headline: llmReport.headline || finalOutput.summary || "顾问团完成审议",
+    recommendation: llmReport.recommendation || finalOutput.recommendation || "采用低风险、可执行的生活方式建议。",
     rationale: asTextList(llmReport.rationale).length
       ? asTextList(llmReport.rationale)
-      : [
-          profileEvidence.profile_analysis,
-          profileEvidence.evidence_review,
-          foodCompanion.recommendation_summary
-        ].filter(Boolean).slice(0, 4),
+      : finalEntries.flatMap((entry) => asTextList(entry.consensus || entry.accepted || entry.bullets)).slice(0, 5),
     actionPlan: asTextList(llmReport.action_plan).length
       ? asTextList(llmReport.action_plan)
-      : asTextList(foodCompanion.today_steps).concat(asTextList(foodCompanion.companion_plan)).slice(0, 5),
+      : finalEntries.filter((entry) => entry.agent === "陪伴教练").flatMap((entry) => asTextList(entry.bullets)).slice(0, 5),
     avoid: asTextList(llmReport.avoid).length
       ? asTextList(llmReport.avoid)
-      : asTextList(foodCompanion.avoid).concat(asTextList(safetyCompliance.objections)).slice(0, 5),
+      : finalEntries.flatMap((entry) => asTextList(entry.challenged)).slice(0, 5),
     watchSignals: asTextList(llmReport.watch_signals).length
       ? asTextList(llmReport.watch_signals)
       : ["如果不适持续、加重，或出现急性症状，请及时咨询医生。"],
@@ -323,8 +398,8 @@ function buildFinalReport({ safetyCompliance, foodCompanion, profileEvidence, lo
       : acceptedEvidence,
     safetyNotes: asTextList(llmReport.safety_notes).length
       ? asTextList(llmReport.safety_notes)
-      : asTextList(safetyCompliance.required_changes).concat([safetyCompliance.risk_review]).filter(Boolean).slice(0, 4),
-    confidence: llmReport.confidence || safetyCompliance.safety_verdict || "caution",
+      : asTextList(finalOutput.required_changes).concat([finalOutput.risk_review]).filter(Boolean).slice(0, 4),
+    confidence: llmReport.confidence || finalOutput.safety_verdict || "caution",
     followUpQuestion: llmReport.follow_up_question || "明天可以根据实际感受再调整。",
     totalDurationMs: timings.totalMs
   };
@@ -426,16 +501,6 @@ const PROFILE_EVIDENCE_SYSTEM = `
 1. 画像分析师：读取用户档案、近期打卡和分群标签，判断当前状态。
 2. 证据检索师：复核本地 RAG/RAFT 已采纳和已过滤证据，指出哪些证据最应该进入回答。
 ${SHARED_SAFETY_RULES}
-输出 JSON：
-{
-  "summary": "一句话总结画像和证据判断",
-  "profile_analysis": "用户当前状态、风险边界和分群理解",
-  "profile_claims": ["画像判断1", "画像判断2", "画像判断3"],
-  "evidence_review": "采纳哪些证据、过滤哪些证据、为什么",
-  "evidence_used": ["采纳证据及理由1", "采纳证据及理由2"],
-  "filtered_out": ["被过滤信息及理由1", "被过滤信息及理由2"],
-  "questions_for_next_agent": ["需要食养建议师处理的疑点或约束"]
-}
 `;
 
 const FOOD_COMPANION_SYSTEM = `
@@ -443,20 +508,6 @@ const FOOD_COMPANION_SYSTEM = `
 1. 食养建议师：基于候选建议、画像与证据，生成 1 个最适合今天执行的生活方式/食养建议。
 2. 陪伴教练：把建议转成低压力、可执行的小步骤。
 ${SHARED_SAFETY_RULES}
-输出 JSON：
-{
-  "summary": "一句话说明推荐方向",
-  "recommended_title": "候选名称",
-  "response_to_evidence": "回应画像与证据组的关键判断",
-  "proposal": "推荐方案正文",
-  "recommendation_summary": "为什么推荐它",
-  "why_this_fits": ["匹配用户档案/证据的理由1", "理由2"],
-  "today_steps": ["今天第一步", "今天第二步", "今天第三步"],
-  "companion_plan": "今天可以怎么做，语气要温和",
-  "alternatives": ["低风险替代方案1", "低风险替代方案2"],
-  "avoid": ["需要避开的情况1", "需要避开的情况2"],
-  "questions_for_safety": ["请安全审查师重点复核的风险点"]
-}
 `;
 
 const SAFETY_COMPLIANCE_SYSTEM = `
@@ -471,14 +522,75 @@ ${SHARED_SAFETY_RULES}
 今天怎么做
 需要避开的情况
 本建议仅为养生参考，不能替代医生判断或医疗处置。
+`;
+
+const ROUND_OUTPUT_CONTRACT = `
+输出 JSON，不能输出 Markdown：
+{
+  "summary": "本席位本轮的一句话摘要",
+  "entries": [
+    {
+      "agent": "本席位模拟的具体角色名称",
+      "stance": "本轮立场或裁决",
+      "content": "完整发言，说明推理和结论",
+      "bullets": ["关键论点1", "关键论点2"],
+      "accepted": ["采纳的证据、观点或共识"],
+      "challenged": ["质疑的证据、观点或风险"],
+      "required_changes": ["要求下一轮或最终答案修正的点"],
+      "alternatives": ["可选替代建议"],
+      "questions": ["留给其他角色或下一轮的问题"],
+      "response_to_previous": "回应上一轮或其他角色的要点",
+      "consensus": ["本轮接受的共识"],
+      "remaining_disagreement": ["仍未统一的分歧"],
+      "confidence": "pass 或 caution 或 block"
+    }
+  ]
+}
+每个席位必须输出 2 个 entries，分别对应它负责的两个角色。不要合并成一个角色。
+`;
+
+const ROUND1_INSTRUCTION = `
+这是 Depredict 式 Round 1：全员独立判断。
+你只能基于用户档案、本地 RAG/RAFT 结果、候选建议和安全规则独立发言；不要假装已经看过其他角色意见。
+每个角色都要给出：初始建议、使用/过滤的证据、担心的风险、希望下一轮别人回答的问题。
+${ROUND_OUTPUT_CONTRACT}
+`;
+
+const ROUND2_INSTRUCTION = `
+这是 Depredict 式 Round 2：交叉反驳。
+你会看到 previous_rounds 中所有角色的 Round 1 发言。每个角色必须明确回应至少 2 个其他角色的观点：
+- 同意哪些，为什么；
+- 反驳哪些，为什么；
+- 哪些建议需要收窄、改写或加安全边界。
+不要直接给最终答案；重点展示讨论、冲突和修正压力。
+${ROUND_OUTPUT_CONTRACT}
+`;
+
+const ROUND3_INSTRUCTION = `
+这是 Depredict 式 Round 3：修正收敛。
+你会看到 Round 1 和 Round 2。每个角色要根据全员反馈修正自己的建议：
+- 说明你接受了哪些反驳；
+- 说明你放弃或保留了哪些观点；
+- 给出最终可接受方案和仍需保留的分歧；
+- 用 consensus 字段写下你同意进入最终答案的共识。
+${ROUND_OUTPUT_CONTRACT}
+`;
+
+const FINAL_SYNTHESIS_INSTRUCTION = `
+这是最终聚合轮。你代表安全审查师和合规编辑读取 previous_rounds，将 6 个角色从分散意见收敛成统一结论。
+必须体现：哪些分歧被解决、哪些风险被保留、最终建议如何因 debate 被修改。
 输出 JSON：
 {
-  "summary": "一句话总结安全和合规处理",
+  "summary": "一句话总结最终结论",
+  "consensus_summary": "从分散到统一的过程摘要",
+  "consensus_points": ["最终共识1", "最终共识2", "最终共识3"],
+  "disagreement_resolved": ["被解决的分歧1", "被解决的分歧2"],
+  "remaining_disagreement": ["仍需谨慎保留的分歧或不确定性"],
   "safety_verdict": "pass 或 caution 或 block",
   "risk_review": "主要风险点或通过理由",
-  "objections": ["对前一轮建议的反驳或风险质疑1", "反驳2"],
   "required_changes": ["最终答案必须修正/保留的点1", "修正点2"],
   "compliance_review": "你做了哪些合规处理",
+  "recommendation": "最终建议一句话",
   "final_report": {
     "headline": "一句有信息量的结论标题",
     "recommendation": "最终建议",

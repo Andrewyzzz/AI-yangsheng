@@ -285,7 +285,7 @@ function renderAdvisor() {
     ${renderHeader("问问 AI 养生顾问团")}
 
     <section class="soft-card">
-      <p class="subtitle">顾问团会先读取你的档案和打卡，再检索证据、过滤干扰资料，最后由 3 个 LLM 席位模拟 6 个顾问角色：画像证据、食养陪伴、安全合规。未配置 API key 时会自动使用本地引擎。</p>
+      <p class="subtitle">顾问团会先读取你的档案和打卡，再检索证据、过滤干扰资料，最后由 3 个 LLM 席位模拟 6 个顾问角色，按独立判断、交叉反驳、修正收敛、统一结论逐轮审议。</p>
     </section>
 
     <h2 class="section-title">专家席位</h2>
@@ -316,7 +316,7 @@ function renderAdvisor() {
 
     ${
       isThinking
-        ? `<div class="card" style="margin-top:22px"><p class="eyebrow">AI Council</p><h3 class="result-title">顾问团正在审议</h3><p class="small muted">本地规则已完成预审，正在等待 3 个 LLM 席位依次输出画像证据、食养陪伴、安全合规定稿。</p></div>`
+        ? `<div class="card" style="margin-top:22px"><p class="eyebrow">AI Council</p><h3 class="result-title">顾问团正在审议</h3><p class="small muted">本地规则已完成预审，正在进行全员独立判断、交叉反驳、修正收敛和统一结论。</p></div>`
         : ""
     }
 
@@ -510,6 +510,9 @@ function renderDebateEntry(entry, index) {
       ${renderEntrySection("论点", entry.bullets)}
       ${renderEntrySection("采纳", entry.accepted)}
       ${renderEntrySection("质疑", entry.challenged)}
+      ${renderEntrySection("修正", entry.revisions)}
+      ${renderEntrySection("共识", entry.consensus)}
+      ${renderEntrySection("保留分歧", entry.remainingDisagreement)}
       ${renderEntrySection("必须修正", entry.requiredChanges)}
       ${renderEntrySection("备选", entry.alternatives)}
       ${renderEntrySection("追问", entry.questions)}
