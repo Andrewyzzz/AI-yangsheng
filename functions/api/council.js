@@ -1,98 +1,102 @@
-const DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-const DEFAULT_MODEL = "qwen-plus";
+const DEFAULT_BASE_URL = "https://api.deepseek.com";
+const DEFAULT_MODEL = "deepseek-chat";
 
 export async function onRequestPost(context) {
   try {
-    const { request, env } = context;
+    const { request, env = {} } = context;
     const payload = await request.json();
-    const apiKey = env.LLM_API_KEY;
-
-    if (!apiKey) {
-      return json({ error: "LLM_API_KEY is not configured" }, 503);
-    }
-
     const localResult = payload.localResult;
     if (!localResult?.answer || !Array.isArray(localResult?.evidence)) {
       return json({ error: "localResult is required" }, 400);
     }
 
-    const baseUrl = trimSlash(env.LLM_BASE_URL || DEFAULT_BASE_URL);
-    const model = env.LLM_MODEL || DEFAULT_MODEL;
-    const provider = env.LLM_PROVIDER || "OpenAI-compatible";
+    const slots = COUNCIL_SLOTS.map((slot) => resolveSlot(env, slot));
+    const missing = slots.filter((slot) => !slot.apiKey);
+    if (missing.length) {
+      return json({
+        error: "LLM council slots are not fully configured",
+        missing: missing.map((slot) => `${slot.prefix}_API_KEY or LLM_API_KEY`)
+      }, 503);
+    }
+
     const contextBundle = buildContextBundle(payload);
 
-    const food = await callAgent({
-      baseUrl,
-      apiKey,
-      model,
-      role: "食养建议师",
-      system: FOOD_SYSTEM,
+    const profileEvidence = await callAgent({
+      slot: slots[0],
       contextBundle
     });
 
-    const safety = await callAgent({
-      baseUrl,
-      apiKey,
-      model,
-      role: "安全审查师",
-      system: SAFETY_SYSTEM,
+    const foodCompanion = await callAgent({
+      slot: slots[1],
       contextBundle: {
         ...contextBundle,
-        previous_agent_output: food
+        profile_evidence_output: profileEvidence
       }
     });
 
-    const compliance = await callAgent({
-      baseUrl,
-      apiKey,
-      model,
-      role: "合规编辑",
-      system: COMPLIANCE_SYSTEM,
+    const safetyCompliance = await callAgent({
+      slot: slots[2],
       contextBundle: {
         ...contextBundle,
-        previous_agent_output: food,
-        safety_agent_output: safety
+        profile_evidence_output: profileEvidence,
+        food_companion_output: foodCompanion
       }
     });
 
-    const answer = sanitizeAnswer(compliance.final_answer || localResult.answer);
+    const answer = sanitizeAnswer(safetyCompliance.final_answer || localResult.answer);
+    const modelSummary = summarizeSlots(slots);
 
     return json({
-      provider,
-      model,
-      agents: ["食养建议师", "安全审查师", "合规编辑"],
+      provider: "3 LLM council",
+      model: modelSummary,
+      agents: ["画像分析师", "证据检索师", "食养建议师", "陪伴教练", "安全审查师", "合规编辑"],
       answer,
       debate: {
         agents: localResult.debate?.agents || [],
         rounds: [
           ...(localResult.debate?.rounds || []),
           {
-            name: "Round 4 LLM 食养建议",
+            name: "Round 4 LLM 画像与证据",
+            entries: [
+              {
+                agent: "画像分析师",
+                stance: slots[0].label,
+                content: profileEvidence.profile_analysis || profileEvidence.summary || "已基于档案和近期打卡完成画像分析。"
+              },
+              {
+                agent: "证据检索师",
+                stance: slots[0].label,
+                content: profileEvidence.evidence_review || "已复核采纳证据和过滤证据的相关性。"
+              }
+            ]
+          },
+          {
+            name: "Round 5 LLM 食养与陪伴",
             entries: [
               {
                 agent: "食养建议师",
-                stance: "生成可执行建议",
-                content: food.summary || "已基于候选和证据生成建议。"
+                stance: slots[1].label,
+                content: foodCompanion.recommendation_summary || foodCompanion.summary || "已基于候选和证据生成建议。"
+              },
+              {
+                agent: "陪伴教练",
+                stance: slots[1].label,
+                content: foodCompanion.companion_plan || "已将建议改写为今天可以执行的小步骤。"
               }
             ]
           },
           {
-            name: "Round 5 LLM 安全反驳",
+            name: "Round 6 LLM 安全与合规",
             entries: [
               {
                 agent: "安全审查师",
-                stance: safety.verdict || "安全复核",
-                content: safety.summary || "已复核禁忌、慢病、过敏、孕期/经期、用药和急症边界。"
-              }
-            ]
-          },
-          {
-            name: "Round 6 LLM 合规定稿",
-            entries: [
+                stance: safetyCompliance.safety_verdict || "安全复核",
+                content: safetyCompliance.risk_review || "已复核禁忌、慢病、过敏、孕期/经期、用药和急症边界。"
+              },
               {
                 agent: "合规编辑",
                 stance: "最终回答",
-                content: compliance.summary || "已移除医疗判断、效果承诺和不合规表达。"
+                content: safetyCompliance.compliance_review || safetyCompliance.summary || "已移除医疗判断、效果承诺和不合规表达。"
               }
             ]
           }
@@ -119,24 +123,59 @@ function buildContextBundle(payload) {
   };
 }
 
-async function callAgent({ baseUrl, apiKey, model, role, system, contextBundle }) {
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+function resolveSlot(env, slot) {
+  const baseUrl = trimSlash(
+    env[`${slot.prefix}_BASE_URL`] ||
+    env.LLM_BASE_URL ||
+    DEFAULT_BASE_URL
+  );
+  return {
+    ...slot,
+    apiKey: env[`${slot.prefix}_API_KEY`] || env.LLM_API_KEY,
+    baseUrl,
+    model: env[`${slot.prefix}_MODEL`] || env.LLM_MODEL || defaultModelForBaseUrl(baseUrl),
+    provider: env[`${slot.prefix}_PROVIDER`] || env.LLM_PROVIDER || defaultProviderForBaseUrl(baseUrl)
+  };
+}
+
+function defaultModelForBaseUrl(baseUrl) {
+  if (/deepseek/i.test(baseUrl)) return "deepseek-chat";
+  if (/openai/i.test(baseUrl)) return "gpt-4o-mini";
+  if (/dashscope|aliyuncs/i.test(baseUrl)) return "qwen-plus";
+  return DEFAULT_MODEL;
+}
+
+function defaultProviderForBaseUrl(baseUrl) {
+  if (/deepseek/i.test(baseUrl)) return "DeepSeek";
+  if (/openai/i.test(baseUrl)) return "OpenAI";
+  if (/dashscope|aliyuncs/i.test(baseUrl)) return "通义千问";
+  return "OpenAI-compatible";
+}
+
+function summarizeSlots(slots) {
+  return slots
+    .map((slot) => `${slot.label}:${slot.provider}/${slot.model}`)
+    .join(" · ");
+}
+
+async function callAgent({ slot, contextBundle }) {
+  const response = await fetch(`${slot.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${apiKey}`,
+      "Authorization": `Bearer ${slot.apiKey}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model,
+      model: slot.model,
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: system },
+        { role: "system", content: slot.system },
         {
           role: "user",
           content: JSON.stringify(
             {
-              role,
+              role: slot.role,
               instructions: "只输出 JSON，不要 Markdown。不要新增未在证据或候选中出现的食材/补剂。所有建议必须是养生参考，不得替代医疗判断。",
               context: contextBundle
             },
@@ -150,7 +189,7 @@ async function callAgent({ baseUrl, apiKey, model, role, system, contextBundle }
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`${role} LLM call failed: ${response.status} ${text.slice(0, 240)}`);
+    throw new Error(`${slot.label} LLM call failed: ${response.status} ${text.slice(0, 240)}`);
   }
 
   const data = await response.json();
@@ -213,36 +252,38 @@ const SHARED_SAFETY_RULES = `
 - 保持温和、日记式、低压力语气。
 `;
 
-const FOOD_SYSTEM = `
-你是 AI 养生顾问团的「食养建议师」。
-你的任务：基于用户档案、近期打卡、候选建议和采纳证据，生成 1 个最适合今天执行的生活方式/食养建议。
+const PROFILE_EVIDENCE_SYSTEM = `
+你是 AI 养生顾问团的「画像与证据组」，同时模拟两个角色：
+1. 画像分析师：读取用户档案、近期打卡和分群标签，判断当前状态。
+2. 证据检索师：复核本地 RAG/RAFT 已采纳和已过滤证据，指出哪些证据最应该进入回答。
 ${SHARED_SAFETY_RULES}
 输出 JSON：
 {
-  "summary": "一句话说明你的建议和理由",
+  "summary": "一句话总结画像和证据判断",
+  "profile_analysis": "用户当前状态、风险边界和分群理解",
+  "evidence_review": "采纳哪些证据、过滤哪些证据、为什么"
+}
+`;
+
+const FOOD_COMPANION_SYSTEM = `
+你是 AI 养生顾问团的「食养与陪伴组」，同时模拟两个角色：
+1. 食养建议师：基于候选建议、画像与证据，生成 1 个最适合今天执行的生活方式/食养建议。
+2. 陪伴教练：把建议转成低压力、可执行的小步骤。
+${SHARED_SAFETY_RULES}
+输出 JSON：
+{
+  "summary": "一句话说明推荐方向",
   "recommended_title": "候选名称",
-  "reasoning": "为什么适合这个用户",
-  "action": "今天怎么做",
+  "recommendation_summary": "为什么推荐它",
+  "companion_plan": "今天可以怎么做，语气要温和",
   "avoid": "需要避开的情况"
 }
 `;
 
-const SAFETY_SYSTEM = `
-你是 AI 养生顾问团的「安全审查师」，你的职责是专门反驳和挑错。
-逐项检查：急症、孕期/经期/哺乳、儿童/老年、糖尿病/高血压/痛风、长期用药、过敏、补剂风险、过度承诺。
-${SHARED_SAFETY_RULES}
-输出 JSON：
-{
-  "verdict": "pass 或 caution 或 block",
-  "summary": "主要风险点或通过理由",
-  "warnings": ["风险1", "风险2"],
-  "must_include": "最终回答必须包含的安全提醒"
-}
-`;
-
-const COMPLIANCE_SYSTEM = `
-你是 AI 养生顾问团的「合规编辑」。
-你要综合本地答案、食养建议师输出和安全审查师输出，写成用户可见的最终回答。
+const SAFETY_COMPLIANCE_SYSTEM = `
+你是 AI 养生顾问团的「安全与合规组」，同时模拟两个角色：
+1. 安全审查师：专门反驳和挑错，逐项检查急症、孕期/经期/哺乳、儿童/老年、糖尿病/高血压/痛风、长期用药、过敏、补剂风险、过度承诺。
+2. 合规编辑：综合本地答案、画像证据组、食养陪伴组和安全审查，写成用户可见的最终回答。
 风格：温和、克制、像养生日记顾问，不像医院诊断书。
 ${SHARED_SAFETY_RULES}
 最终回答结构：
@@ -253,7 +294,34 @@ ${SHARED_SAFETY_RULES}
 本建议仅为养生参考，不能替代医生判断或医疗处置。
 输出 JSON：
 {
-  "summary": "你做了哪些合规处理",
+  "summary": "一句话总结安全和合规处理",
+  "safety_verdict": "pass 或 caution 或 block",
+  "risk_review": "主要风险点或通过理由",
+  "compliance_review": "你做了哪些合规处理",
   "final_answer": "给用户看的最终回答"
 }
 `;
+
+const COUNCIL_SLOTS = [
+  {
+    key: "profileEvidence",
+    prefix: "LLM_PROFILE_EVIDENCE",
+    label: "画像与证据组",
+    role: "画像分析师 + 证据检索师",
+    system: PROFILE_EVIDENCE_SYSTEM
+  },
+  {
+    key: "foodCompanion",
+    prefix: "LLM_FOOD_COMPANION",
+    label: "食养与陪伴组",
+    role: "食养建议师 + 陪伴教练",
+    system: FOOD_COMPANION_SYSTEM
+  },
+  {
+    key: "safetyCompliance",
+    prefix: "LLM_SAFETY_COMPLIANCE",
+    label: "安全与合规组",
+    role: "安全审查师 + 合规编辑",
+    system: SAFETY_COMPLIANCE_SYSTEM
+  }
+];
