@@ -23,6 +23,19 @@ python3 -m http.server 5173
 http://localhost:5173
 ```
 
+## Cloudflare Workers 部署
+
+仓库已经包含 `wrangler.jsonc` 和 `worker.js`，适合直接部署到 Cloudflare Workers Static Assets。
+
+```bash
+npm install
+npm run deploy
+```
+
+Cloudflare 构建时会先执行 `npm run build`，只把 `index.html` 和 `src/` 复制到 `dist/`。`wrangler.jsonc` 的 assets directory 指向 `./dist`，避免把 `node_modules` 当作静态资源上传。
+
+部署时需要在 Cloudflare Worker 的 Variables / Secrets 中配置下方 LLM 环境变量。`/api/council` 会由 `worker.js` 转发给 `functions/api/council.js`，其余页面资源从 `dist` 静态提供。
+
 ## 当前能力
 
 - 基于用户档案、打卡历史、过敏/慢病/生理状态回答问题
