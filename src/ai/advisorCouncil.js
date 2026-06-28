@@ -84,18 +84,21 @@ function firstSentence(text) {
 
 function buildEvidenceUse(doc) {
   if (doc.id === "habit-irritation") {
-    return "用于把“上火”先拆成口干、嗓子不适和刺激诱因观察，并把建议收敛为温水补液、减少辛辣油炸酒精、注意湿度和用嗓休息。";
+    return "提示先关注口干、嗓子不适和刺激诱因，因此建议从温水补液、减少辛辣油炸酒精、注意湿度和用嗓休息开始。";
   }
   if (doc.id === "food-pear-tremella") {
-    return "用于支持银耳雪梨汤或温梨水作为可选温和汤水，同时限定为小碗、不额外加糖，并保留血糖和胃肠边界。";
+    return "提示银耳雪梨汤或温梨水可以作为温和汤水选择，但要小碗、不额外加糖，并注意血糖和胃肠反应。";
   }
   if (doc.id === "guide-balanced-meal") {
-    return "用于保留正常主食、蔬菜和蛋白，不把日常不适引向极端忌口或盲目进补。";
+    return "提醒保持正常主食、蔬菜和蛋白，不要因为一时不舒服就走向极端忌口或盲目进补。";
+  }
+  if (doc.id === "habit-sleep") {
+    return "提示疲惫常和睡眠、压力、饮食节律有关，因此建议先从固定入睡、减少高糖和咖啡因、轻量活动做起。";
   }
   if (doc.type === "safety") {
-    return `用于设置安全边界：${firstSentence(doc.safety || doc.content)}`;
+    return `提醒需要保留安全边界：${firstSentence(doc.safety || doc.content)}`;
   }
-  return `用于提供${doc.type || "知识库"}参考：${firstSentence(doc.content)}`;
+  return `${firstSentence(doc.content)}`;
 }
 
 function evidenceAdoptionLines(docs, limit = 3) {
@@ -105,19 +108,49 @@ function evidenceAdoptionLines(docs, limit = 3) {
 }
 
 function buildNarrative({ focus, topTitle, accepted, recentSummary, segments, warnings, contraindications }) {
-  const evidenceBridge = accepted.length
-    ? evidenceAdoptionLines(accepted, 3).map((line) => line.replace(/[。；;]+$/, "")).join("；")
-    : "本轮没有强相关 RAG 资料进入建议，因此只保留基础安全规则和低风险观察。";
   const statusLine = segments.length ? segments.join("、") : "日常养生观察";
   const safetyLine = uniqueList([
     ...warnings,
     ...contraindications.map((item) => `个人边界：${item}`)
   ], 4).join("；");
+  const primaryAction = topTitle || focus.label;
+  const evidenceDocs = accepted.filter((doc) => {
+    if (focus.label !== "疲惫恢复观察") return true;
+    return !/黄芪|人参|阿胶/.test(doc.title) || /黄芪|人参|阿胶/.test(primaryAction);
+  });
+  const evidenceHint = evidenceDocs
+    .slice(0, 2)
+    .map((doc) => firstSentence(doc.content))
+    .filter(Boolean)
+    .join("；");
+  const isGeneral = focus.label === "日常状态观察";
+
+  if (isGeneral) {
+    return [
+      `从你现在给到的信息看，还不足以判断是某一种明确问题，更适合先按「${focus.label}」处理。你目前的近期记录是「${recentSummary}」，系统识别到的状态是「${statusLine}」，所以今天不建议上来就大补或强行忌口，而是先用一餐温和、规律、容易执行的方案观察反应。`,
+      evidenceHint
+        ? `饮食上可以选择更温和、配料简单的餐食作为今天的起点。参考资料提示：${evidenceHint}。如果主方案是「${primaryAction}」，它更适合短期、低频、小份尝试，而不是连续大量吃。`
+        : `饮食上先回到基础：正常吃主食、蔬菜和蛋白，减少过甜、过油和刺激性食物。今天的重点不是追求立刻见效，而是看身体对更温和节律的反应。`,
+      `${safetyLine ? `考虑到${safetyLine}，` : ""}今天执行时要先核对过敏成分，吃完后记录精神、胃口、睡眠和不适变化。如果出现明显加重、发热、胸闷、呼吸不适或持续不缓解，就不要继续自行处理，及时咨询医生。`
+    ];
+  }
+
+  if (focus.label === "疲惫恢复观察") {
+    return [
+      `从你的描述看，现在更适合先按「疲惫恢复观察」处理，而不是直接判断是哪一种身体问题。你目前的近期记录是「${recentSummary}」，可识别状态为「${statusLine}」，所以今天的重点是先把饮食、活动和睡眠节律拉回温和稳定。`,
+      evidenceHint
+        ? `饮食上建议选择温热、清淡、配料简单的一餐，是因为资料提示：${evidenceHint}。如果主方案是「${primaryAction}」，它更适合作为今天临时过渡，而不是连续依赖或替代正常饮食。`
+        : `饮食上建议选择温热、清淡、配料简单的一餐，不要靠甜饮、浓咖啡或补剂硬撑。主食、蔬菜和蛋白正常吃，先观察精神和胃口变化。`,
+      `${safetyLine ? `考虑到${safetyLine}，` : ""}今天吃完后记录精神变化、胃口、困倦程度和睡眠。若疲惫持续加重，或伴随胸闷、呼吸困难、体重明显变化等信号，要及时咨询医生。`
+    ];
+  }
 
   return [
-    `顾问团先把这个问题放在「${focus.label}」里看，而不是直接判断身体哪里出了问题。你目前的近期记录是「${recentSummary}」，系统可识别标签为「${statusLine}」，所以建议从低风险、可观察的生活调整开始。`,
-    `RAG/RAFT 在这里采用“少而准”的策略，只让高相关证据进入结论：${evidenceBridge}。这些证据共同把建议从“泛泛吃点什么”收敛到「${topTitle || focus.label}」这条主线。`,
-    `最终方案会同时保留两件事：今天能执行的温和调整，以及明天可以反馈给顾问团的症状记录。${safetyLine ? `安全边界也会一起放进去，尤其是${safetyLine}。` : "如果后续出现明显加重或急性信号，需要及时咨询医生。"}`
+    `从你的描述看，这更像是需要先观察口干、嗓子不适、饮食刺激、熬夜或环境干燥这些因素的日常状态，而不是直接下疾病结论。今天可以先把目标定得很具体：减少刺激、补足温水、让嗓子和身体有一点恢复空间。`,
+    evidenceHint
+      ? `饮食建议会偏向温和清淡，是因为资料提示：${evidenceHint}。所以这次不是让你盲目“降火”或进补，而是把建议落到「${primaryAction}」：少辣少炸少甜，必要时用小碗、无糖的温和汤水替代刺激饮品。`
+      : `饮食建议会偏向温和清淡：少辣少炸少甜，正常吃主食和蔬菜，不用刻意进补，也不要靠甜饮、酒精或很刺激的食物“压过去”。`,
+    `${safetyLine ? `考虑到${safetyLine}，` : ""}今天可以先执行一天，再记录口干或嗓子不适出现的时间、持续多久、是否和辛辣饮食、熬夜、空调房或说话多有关。如果伴随发热、吞咽困难、呼吸不适、皮疹，或症状持续加重，要及时咨询医生。`
   ];
 }
 
@@ -134,6 +167,11 @@ function scoreDocument(doc, question, profile, checkins) {
     }
   });
 
+  if (/累|疲劳|没精神|乏力|困倦/.test(question) && doc.tags.includes("疲惫")) {
+    score += 3;
+    reasons.push("疲惫表达命中");
+  }
+
   profileWords.forEach((word) => {
     if (doc.tags.includes(word) || doc.content.includes(word) || doc.safety.includes(word)) {
       score += 2;
@@ -149,7 +187,7 @@ function scoreDocument(doc, question, profile, checkins) {
     score += 2;
     reasons.push("食谱类问题优先引用");
   }
-  if (doc.type === "habit" && /疲惫|睡|压力|胀气|沉重|连续/.test(question)) {
+  if (doc.type === "habit" && /疲惫|累|疲劳|没精神|乏力|困倦|睡|压力|胀气|沉重|连续/.test(question)) {
     score += 2;
     reasons.push("生活方式问题优先引用");
   }
@@ -230,6 +268,26 @@ function deriveQuestionFocus(question) {
     };
   }
 
+  if (/累|疲惫|疲劳|没精神|乏力|困倦|熬夜/.test(question)) {
+    return {
+      label: "疲惫恢复观察",
+      likelyFactors: ["睡眠不足或作息不稳", "压力、饮食不规律或活动量不足", "近期熬夜后恢复不够"],
+      actionPlan: [
+        "今天先保证一餐温热、清淡、配料简单的主食和蛋白，不用急着进补",
+        "晚间减少咖啡因、酒精和高糖零食，给睡眠留出恢复空间",
+        "白天安排 10-15 分钟轻走或拉伸，避免一直坐着硬扛",
+        "今晚尽量固定入睡时间，睡前 30 分钟减少刷屏"
+      ],
+      avoid: ["连续熬夜后立刻大补", "靠高糖饮料或浓咖啡硬撑", "把补剂当成恢复方式"],
+      watchSignals: [
+        "记录今天精神低谷出现的时间、是否与睡眠不足或压力有关",
+        "记录吃完后的胃口、困倦、心慌或胃部不适变化",
+        "如果疲惫持续加重，或伴随胸闷、呼吸困难、体重明显变化，及时咨询医生"
+      ],
+      followUpQuestion: "明天告诉我：昨晚睡了多久、今天精神最差在几点、吃完后有没有更困或胃不舒服。"
+    };
+  }
+
   return {
     label: "日常状态观察",
     likelyFactors: ["睡眠、压力、饮食节律和近期活动都可能影响体感"],
@@ -269,7 +327,11 @@ function rankCandidates(candidates, profile, checkins, question) {
       const historyBoost = checkins.some((item) => item.feedback === "effective" && item.answer?.includes(candidate.title))
         ? 2
         : 0;
-      const fitScore = candidate.relevanceScore + historyBoost - safety.warnings.length * 2;
+      const conservativePenalty = /黄芪|人参|阿胶/.test(`${candidate.title || ""}${candidate.content || ""}`) &&
+        !/怕冷|熬夜|黄芪|人参|阿胶|能量不足/.test(question)
+        ? 4
+        : 0;
+      const fitScore = candidate.relevanceScore + historyBoost - safety.warnings.length * 2 - conservativePenalty;
       return {
         ...candidate,
         safety,
@@ -330,7 +392,7 @@ function buildAnswer({ question, triage, profile, checkins, evidence, ranked, se
   const answer = [
     `顾问团综合建议：今天优先做「${topTitle}」。`,
     ...narrative,
-    `简单说，本次采纳了 ${evidenceLine || "内部安全规则库"} 作为依据。`,
+    evidenceLine ? `建议依据：主要参考了 ${evidenceLine}，并结合你的档案边界做了收窄。` : "",
     `怎么做：${actionSteps.join("；")}。`,
     `观察什么：${focus.watchSignals.slice(0, 3).join("；")}。`,
     cautionLine,
@@ -386,10 +448,10 @@ function buildFinalReport({ question, triage, profile, checkins, evidence, ranke
       contraindications
     }),
     rationale: [
-      `问题焦点：${focus.label}`,
+      `观察判断：更适合先按${focus.label}处理，不直接做疾病诊断`,
       `近期记录：${recentSummary}`,
-      `当前标签：${segments.join("、") || "日常养生观察"}`,
-      accepted.length ? `采纳证据：${accepted.slice(0, 3).map((doc) => doc.title).join("、")}` : "采纳内部安全规则",
+      `当前状态：${segments.join("、") || "日常养生观察"}`,
+      accepted.length ? `建议依据：${accepted.slice(0, 3).map((doc) => doc.title).join("、")}` : "建议依据：基础安全规则",
       ...focus.likelyFactors.slice(0, 2)
     ],
     actionPlan: top
@@ -432,7 +494,7 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
     agents: AGENTS,
     rounds: [
       {
-        name: "Round 1 独立判断",
+        name: "本地预审 Round 1 独立判断",
         entries: [
           {
             agent: "画像分析师",
@@ -466,7 +528,7 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
         ]
       },
       {
-        name: "Round 2 安全反驳",
+        name: "本地预审 Round 2 安全反驳",
         entries: [
           {
             agent: "安全审查师",
@@ -485,7 +547,7 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
         ]
       },
       {
-        name: "Round 3 综合输出",
+        name: "本地预审 Round 3 修正收敛",
         entries: [
           {
             agent: "画像分析师",
@@ -544,6 +606,31 @@ function buildDebate({ profile, question, triage, evidence, ranked, segments }) 
             content: "最终回答需要先用段落讲清楚判断过程，再用清单承接今天怎么做，避免只有碎片化 bullet。",
             requiredChanges: ["用自然段解释 RAG 如何进入结论", "清单只承担执行步骤和观察指标", "保留养生参考边界"],
             consensus: ["段落负责解释，清单负责执行；两者都要保留"]
+          }
+        ]
+      },
+      {
+        name: "本地预审 Round 4 统一结论",
+        entries: [
+          {
+            agent: "安全审查师",
+            stance: safetyWarnings.length ? "谨慎通过" : "低风险通过",
+            content: safetyWarnings.length
+              ? `最终允许给出低风险生活方式建议，但必须保留这些边界：${[...new Set(safetyWarnings)].slice(0, 3).join("；")}。`
+              : "最终允许给出低风险生活方式建议，但仍需提醒持续加重或急性信号时咨询医生。",
+            requiredChanges: ["不做疾病诊断", "不承诺效果", "不建议停药换药或替代医生判断"],
+            remainingDisagreement: safeChallenges
+          },
+          {
+            agent: "合规编辑",
+            stance: "用户可见结论",
+            content: `统一后的用户回答应直接说观察判断和今天怎么做，不暴露内部检索、过滤和打分过程。主建议为「${top ? (top.type === "habit" ? focus.label : top.title) : focus.label}」。`,
+            bullets: planSteps.slice(0, 4),
+            consensus: [
+              "用户看到的是观察判断和操作建议",
+              "审议过程可以展示证据和反驳，但最终回答不展示内部术语",
+              "保留安全边界和后续记录问题"
+            ]
           }
         ]
       }

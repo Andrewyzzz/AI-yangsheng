@@ -23,7 +23,7 @@ export async function onRequestPost(context) {
     const startedAt = Date.now();
 
     const round1 = await runDebateRound({
-      name: "Round 4 LLM 全员独立判断",
+      name: "LLM Round 1 全员独立判断",
       phase: "independent_analysis",
       slots,
       contextBundle,
@@ -31,7 +31,7 @@ export async function onRequestPost(context) {
     });
 
     const round2 = await runDebateRound({
-      name: "Round 5 LLM 交叉反驳",
+      name: "LLM Round 2 交叉反驳",
       phase: "cross_rebuttal",
       slots,
       contextBundle: {
@@ -42,7 +42,7 @@ export async function onRequestPost(context) {
     });
 
     const round3 = await runDebateRound({
-      name: "Round 6 LLM 修正收敛",
+      name: "LLM Round 3 修正收敛",
       phase: "revision_and_convergence",
       slots,
       contextBundle: {
@@ -348,7 +348,7 @@ function buildConvergenceDebate({ localResult, rounds, finalOutput, timings, fin
       ...(localResult.debate?.rounds || []),
       ...rounds,
       {
-        name: "Round 7 统一结论",
+        name: "LLM Round 4 统一结论",
         phase: "aggregation",
         summary: finalOutput.consensus_summary || finalOutput.summary || "顾问团完成从分歧到统一的最终整合。",
         durationMs: timings.slots[timings.slots.length - 1]?.durationMs,
@@ -402,7 +402,7 @@ function buildFinalReport({ finalOutput, rounds, localResult, timings }) {
       .slice(0, 6);
   };
 
-  return {
+  const report = {
     headline: llmReport.headline || localReport.headline || finalOutput.summary || "顾问团完成审议",
     recommendation:
       llmReport.recommendation ||
@@ -448,6 +448,7 @@ function buildFinalReport({ finalOutput, rounds, localResult, timings }) {
     followUpQuestion: llmReport.follow_up_question || llmReport.followUpQuestion || localReport.followUpQuestion || "明天可以根据实际感受再调整。",
     totalDurationMs: timings.totalMs
   };
+  return scrubFinalReport(report);
 }
 
 function formatFinalAnswer(report) {
@@ -485,6 +486,35 @@ function asTextList(value) {
     .map((item) => item.replace(/^[-*]\s*/, "").trim())
     .filter(Boolean)
     .slice(0, 8);
+}
+
+function scrubFinalReport(report) {
+  const scrubListFields = ["narrative", "rationale", "actionPlan", "avoid", "watchSignals", "safetyNotes"];
+  const scrubTextFields = ["headline", "recommendation", "followUpQuestion"];
+  const next = { ...report };
+  scrubTextFields.forEach((field) => {
+    if (next[field]) next[field] = scrubUserFacingText(next[field]);
+  });
+  scrubListFields.forEach((field) => {
+    if (Array.isArray(next[field])) {
+      next[field] = next[field].map(scrubUserFacingText).filter(Boolean);
+    }
+  });
+  return next;
+}
+
+function scrubUserFacingText(value) {
+  return String(value || "")
+    .replace(/RAG\/RAFT|RAG|RAFT/gi, "知识库")
+    .replace(/检索/g, "参考")
+    .replace(/过滤/g, "排除")
+    .replace(/打分/g, "评估")
+    .replace(/收敛/g, "聚焦")
+    .replace(/候选建议/g, "可选做法")
+    .replace(/候选/g, "可选")
+    .replace(/内部安全规则/g, "基础安全规则")
+    .replace(/证据采纳/g, "建议依据")
+    .trim();
 }
 
 function safeJson(content) {
@@ -564,7 +594,7 @@ const SAFETY_COMPLIANCE_SYSTEM = `
 ${SHARED_SAFETY_RULES}
 最终回答结构：
 顾问团综合建议
-为什么这样建议：先用 2-3 个自然段讲清楚判断过程和证据如何进入结论
+为什么这样建议：先用 2-3 个自然段讲清楚观察判断和建议依据，但不要暴露 RAG、RAFT、过滤、打分、收敛等内部术语
 今天怎么做
 需要避开的情况
 本建议仅为养生参考，不能替代医生判断或医疗处置。
@@ -626,10 +656,10 @@ ${ROUND_OUTPUT_CONTRACT}
 const FINAL_SYNTHESIS_INSTRUCTION = `
 这是最终聚合轮。你代表安全审查师和合规编辑读取 previous_rounds，将 6 个角色从分散意见收敛成统一结论。
 必须体现：哪些分歧被解决、哪些风险被保留、最终建议如何因 debate 被修改。
-最终回答不能只有一点一点的清单，必须先有 2-3 个自然段说明：
-- 顾问团如何理解用户问题；
-- RAG/RAFT 采纳了哪些证据，以及每条证据如何改变最终建议；
-- 为什么从分散意见收敛到当前方案。
+final_report.narrative 和 final_answer 是给用户看的，不能暴露内部流程词，例如 RAG、RAFT、检索、过滤、打分、收敛、候选、角色争论。必须先有 2-3 个自然段说明：
+- 对用户问题的观察判断，但不要做疾病诊断；
+- 为什么建议这样操作，把证据转译成用户能理解的依据；
+- 今天怎么执行，以及什么情况下需要停止自行处理并咨询医生。
 清单只用于“今天怎么做”“观察什么”“需要避开什么”。
 最终报告必须具体，不能只写“记录具体症状”。如果用户问上火、口干、嗓子痒、喉咙不适，action_plan 至少包含：
 - 今天饮水/饮品怎么调整；
@@ -655,7 +685,7 @@ watch_signals 至少包含：
   "final_report": {
     "headline": "一句有信息量的结论标题",
     "recommendation": "最终建议",
-    "narrative": ["自然段1：解释问题理解和画像", "自然段2：解释 RAG 证据如何被采纳", "自然段3：解释从分歧到统一的过程"],
+    "narrative": ["自然段1：用户可读的观察判断", "自然段2：用户可读的建议依据", "自然段3：用户可读的执行和安全边界"],
     "rationale": ["依据1", "依据2", "依据3"],
     "action_plan": ["今天怎么做1", "今天怎么做2", "今天怎么做3"],
     "avoid": ["不建议做什么1", "不建议做什么2"],

@@ -450,11 +450,11 @@ function renderEvidence(item) {
   const filteredCount = evidence.filter((doc) => doc.raftDecision === "filter").length;
   const visibleEvidence = accepted.length ? accepted : evidence.slice(0, 1);
   return `
-    <h2 class="section-title">RAG / RAFT 证据过滤</h2>
+    <h2 class="section-title">证据参考与安全筛选</h2>
     <section class="evidence-summary">
       <div><span>采纳</span><strong>${accepted.length}</strong></div>
       <div><span>过滤</span><strong>${filteredCount}</strong></div>
-      <p>${escapeHtml(accepted.length ? "仅展示进入审议的高相关证据，低相关资料折叠处理。" : "暂无强相关证据，低相关资料不进入最终建议。")}</p>
+      <p>${escapeHtml(accepted.length ? "仅展示与当前问题和档案最相关的参考，低相关资料折叠处理。" : "暂无强相关参考，先按基础安全规则给出低风险建议。")}</p>
     </section>
     <section class="evidence-list">
       ${visibleEvidence
@@ -485,8 +485,12 @@ function renderEvidence(item) {
 
 function renderDebate(item) {
   const metrics = item.debate?.metrics;
+  const fallbackNotice = item.llm?.mode === "local"
+    ? `<section class="debate-fallback"><strong>当前只显示本地预审</strong><span>真实 LLM 多轮 debate 未完成或当前记录是旧记录。原因：${escapeHtml(item.llm.reason || "未配置或未返回")}。重新提问会再次尝试调用 LLM Round 1-4。</span></section>`
+    : "";
   return `
     <h2 class="section-title">AI Debate 审议过程</h2>
+    ${fallbackNotice}
     ${
       metrics
         ? `<section class="debate-metrics">

@@ -503,6 +503,27 @@ button {
   margin-bottom: 12px;
 }
 
+.debate-fallback {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid rgba(176, 106, 46, 0.24);
+  border-radius: 16px;
+  background: rgba(255, 246, 231, 0.72);
+}
+
+.debate-fallback strong {
+  color: var(--amber);
+  font-size: 13px;
+}
+
+.debate-fallback span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .debate-metrics div {
   display: grid;
   gap: 4px;
